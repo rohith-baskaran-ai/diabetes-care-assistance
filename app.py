@@ -49,13 +49,22 @@ def get_risk_level(prob):
     else:
         return "High Risk", "red"
 
-def call_groq(system, user):
+def call_groq(system, user, history=None):
+    messages = [{"role": "system", "content": system}]
+    
+    # add last 10 messages if history exists
+    if history:
+        for msg in history[-10:]:
+            messages.append({
+                "role":    msg["role"],
+                "content": msg["content"]
+            })
+    
+    messages.append({"role": "user", "content": user})
+    
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user",   "content": user}
-        ],
+        messages=messages,
         max_tokens=1000
     )
     return response.choices[0].message.content
@@ -73,7 +82,8 @@ AI-powered diabetes risk assessment + personalized health guidance
 st.divider()
 
 # ─── TABS ───────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs([
+tab0, tab1, tab2, tab3, tab4 = st.tabs([
+    "👤 My Profile",
     "🔍 Risk Assessment",
     "💬 Health Assistant",
     "🥗 Diet Plan",
@@ -81,9 +91,178 @@ tab1, tab2, tab3, tab4 = st.tabs([
 ])
 
 # ════════════════════════════════════════════════════════
+# TAB 0 — PATIENT PROFILE
+# ════════════════════════════════════════════════════════
+with tab0:
+    st.subheader("👤 My Health Profile")
+    st.caption("Fill this once — all tabs will use your profile automatically")
+
+    # Initialize profile
+    if "profile" not in st.session_state:
+        st.session_state.profile = {}
+
+    profile = st.session_state.profile
+
+    # ── Personal Info ────────────────────────────────────
+    st.markdown("### 🧑 Personal Information")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        name   = st.text_input("Full Name",
+                                value=profile.get("name", ""),
+                                placeholder="Your name")
+    with col2:
+        age    = st.number_input("Age",
+                                  min_value=18, max_value=100,
+                                  value=profile.get("age", 35))
+    with col3:
+        gender = st.selectbox("Gender",
+                               ["Male", "Female", "Other"],
+                               index=["Male", "Female", "Other"].index(
+                                   profile.get("gender", "Male")))
+
+    # ── Physical Stats ───────────────────────────────────
+    st.markdown("### 📏 Physical Stats")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        height = st.number_input("Height (cm)",
+                                  min_value=100, max_value=250,
+                                  value=profile.get("height", 170))
+    with col2:
+        weight = st.number_input("Weight (kg)",
+                                  min_value=30, max_value=300,
+                                  value=profile.get("weight", 70))
+    with col3:
+        # Auto calculate BMI
+        bmi_auto = weight / ((height/100) ** 2)
+        st.metric("Your BMI", f"{bmi_auto:.1f}")
+
+    # ── Medical Info ─────────────────────────────────────
+    st.markdown("### 🏥 Medical Information")
+    col1, col2 = st.columns(2)
+    with col1:
+        diabetes_type = st.selectbox(
+            "Diabetes Status",
+            ["Not diagnosed", "At risk", "Pre-diabetic",
+             "Type 2 Diabetes", "Type 1 Diabetes"],
+            index=["Not diagnosed", "At risk", "Pre-diabetic",
+                   "Type 2 Diabetes", "Type 1 Diabetes"].index(
+                       profile.get("diabetes_type", "Not diagnosed"))
+        )
+        diet_pref = st.selectbox(
+            "Diet Preference",
+            ["Vegetarian", "Non-Vegetarian", "Vegan"],
+            index=["Vegetarian", "Non-Vegetarian", "Vegan"].index(
+                profile.get("diet_pref", "Vegetarian")), 
+                key="profile_diet_type"
+        )
+        cuisine = st.selectbox(
+            "Cuisine Preference",
+            ["Indian", "Mediterranean", "Asian", "Western"],
+            index=["Indian", "Mediterranean", "Asian", "Western"].index(
+                profile.get("cuisine", "Indian"))
+        )
+
+    with col2:
+        conditions = st.multiselect(
+            "Other conditions",
+            ["Hypertension", "High Cholesterol", "Obesity",
+             "Heart Disease", "Kidney Disease", "None"],
+            default=profile.get("conditions", ["None"])
+        )
+        allergies = st.multiselect(
+            "Food Allergies",
+            ["Gluten", "Dairy", "Nuts", "Soy", "Eggs", "None"],
+            default=profile.get("allergies", ["None"])
+        )
+        fitness_level = st.selectbox(
+            "Fitness Level",
+            ["Sedentary", "Lightly active",
+             "Moderately active", "Very active"],
+            index=["Sedentary", "Lightly active",
+                   "Moderately active", "Very active"].index(
+                       profile.get("fitness_level", "Sedentary"))
+        )
+
+    # ── Blood Sugar Targets ──────────────────────────────
+    st.markdown("### 🎯 Personal Targets")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        target_fasting = st.number_input(
+            "Target Fasting Blood Sugar (mg/dL)",
+            min_value=70, max_value=150,
+            value=profile.get("target_fasting", 100),
+            help="Normal: 70-100 mg/dL"
+        )
+    with col2:
+        target_postmeal = st.number_input(
+            "Target Post-meal Blood Sugar (mg/dL)",
+            min_value=100, max_value=250,
+            value=profile.get("target_postmeal", 140),
+            help="Normal: less than 140 mg/dL"
+        )
+    with col3:
+        target_weight = st.number_input(
+            "Target Weight (kg)",
+            min_value=30, max_value=200,
+            value=profile.get("target_weight", weight)
+        )
+
+    st.divider()
+
+    # ── Save Profile ─────────────────────────────────────
+    if st.button("💾 Save Profile", type="primary"):
+        st.session_state.profile = {
+            "name":            name,
+            "age":             age,
+            "gender":          gender,
+            "height":          height,
+            "weight":          weight,
+            "bmi":             round(bmi_auto, 1),
+            "diabetes_type":   diabetes_type,
+            "diet_pref":       diet_pref,
+            "cuisine":         cuisine,
+            "conditions":      conditions,
+            "allergies":       allergies,
+            "fitness_level":   fitness_level,
+            "target_fasting":  target_fasting,
+            "target_postmeal": target_postmeal,
+            "target_weight":   target_weight
+        }
+        st.success(f"✅ Profile saved! Welcome, {name}!")
+        st.balloons()
+
+    # ── Profile Summary ──────────────────────────────────
+    if st.session_state.profile:
+        st.divider()
+        p = st.session_state.profile
+        st.markdown("### 📋 Your Profile Summary")
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Name",         p.get('name', '-'))
+        col2.metric("Age",          p.get('age', '-'))
+        col3.metric("BMI",          p.get('bmi', '-'))
+        col4.metric("Status",       p.get('diabetes_type', '-'))
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Diet",         p.get('diet_pref', '-'))
+        col2.metric("Cuisine",      p.get('cuisine', '-'))
+        col3.metric("Target Fast",  f"{p.get('target_fasting', '-')} mg/dL")
+        col4.metric("Target Post",  f"{p.get('target_postmeal', '-')} mg/dL")
+
+        st.info(f"✅ Profile complete! All tabs are now personalized for **{p.get('name', 'you')}**.")
+    else:
+        st.warning("⚠️ Please fill and save your profile to personalize all features.")
+
+# ════════════════════════════════════════════════════════
 # TAB 1 — RISK ASSESSMENT
 # ════════════════════════════════════════════════════════
 with tab1:
+    p = st.session_state.get("profile", {})
+
+    # Show profile banner if available
+    if p:
+        st.success(f"👤 Logged in as: **{p.get('name')}** | {p.get('diabetes_type')} | BMI: {p.get('bmi')}")
+        
     st.subheader("🔍 Diabetes Risk Assessment")
     st.write("Enter your health metrics to assess your diabetes risk.")
 
@@ -91,37 +270,39 @@ with tab1:
 
     with col1:
         glucose    = st.number_input("Glucose Level (mg/dL)",
-                                      min_value=50, max_value=300,
-                                      value=117,
-                                      help="Normal: 70-100 mg/dL fasting")
+                              min_value=50, max_value=300,
+                              value=117, key="ra_glucose",
+                              help="Normal: 70-100 mg/dL fasting")
         bmi        = st.number_input("BMI",
-                                      min_value=10.0, max_value=70.0,
-                                      value=32.0,
-                                      help="Normal: 18.5-24.9")
+                              min_value=10.0, max_value=70.0,
+                              value=float(p.get('bmi', 32.0)),
+                              key="ra_bmi",
+                              help="Normal: 18.5-24.9")
         age        = st.number_input("Age",
-                                      min_value=18, max_value=100,
-                                      value=33)
+                              min_value=18, max_value=100,
+                              value=int(p.get('age', 33)),
+                              key="ra_age")
         blood_pressure = st.number_input("Blood Pressure (mm Hg)",
-                                          min_value=40, max_value=150,
-                                          value=72,
-                                          help="Normal: 60-80 mm Hg diastolic")
+                                  min_value=40, max_value=150,
+                                  value=72, key="ra_bp",
+                                  help="Normal: 60-80 mm Hg diastolic")
 
     with col2:
         pregnancies = st.number_input("Number of Pregnancies",
-                                       min_value=0, max_value=20,
-                                       value=1)
+                               min_value=0, max_value=20,
+                               value=1, key="ra_preg")
         insulin     = st.number_input("Insulin Level (μU/mL)",
-                                       min_value=0, max_value=900,
-                                       value=30,
-                                       help="Normal fasting: 2-25 μU/mL")
+                               min_value=0, max_value=900,
+                               value=30, key="ra_insulin",
+                               help="Normal fasting: 2-25 μU/mL")
         skin_thickness = st.number_input("Skin Thickness (mm)",
-                                          min_value=0, max_value=100,
-                                          value=23,
-                                          help="Triceps skin fold thickness")
+                                  min_value=0, max_value=100,
+                                  value=23, key="ra_skin",
+                                  help="Triceps skin fold thickness")
         dpf = st.number_input("Diabetes Pedigree Function",
-                               min_value=0.0, max_value=3.0,
-                               value=0.47,
-                               help="Family history score (0=no history, 2.5=strong history)")
+                       min_value=0.0, max_value=3.0,
+                       value=0.47, key="ra_dpf",
+                       help="Family history score")
 
     st.divider()
 
@@ -196,15 +377,19 @@ with tab2:
         st.session_state.health_messages = []
 
     # System context
+    # Replace the user_context block with this:
     user_context = ""
-    if "user_profile" in st.session_state:
-        p = st.session_state.user_profile
+    if p:
         user_context = f"""
-The user has been assessed with these metrics:
-Glucose: {p['Glucose']}, BMI: {p['BMI']}, Age: {p['Age']}
-Risk Level: {st.session_state.risk_level}
-({st.session_state.risk_prob*100:.1f}% diabetes probability)
-Personalize your answers based on their profile."""
+Patient Profile:
+- Name: {p.get('name')}
+- Age: {p.get('age')}, Gender: {p.get('gender')}
+- Diabetes Status: {p.get('diabetes_type')}
+- BMI: {p.get('bmi')}
+- Conditions: {', '.join(p.get('conditions', []))}
+- Diet: {p.get('diet_pref')}
+- Fitness: {p.get('fitness_level')}
+Always address them by name and personalize your answers."""
 
     system = f"""You are a knowledgeable diabetes health assistant.
 You help patients understand diabetes, manage their condition,
@@ -230,9 +415,10 @@ Be empathetic, clear, and practical.
     for msg in st.session_state.health_messages:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
+            
 
     # Input
-    if question := st.chat_input("Ask about diabetes..."):
+    if question := st.chat_input("Ask about diabetes..."): #walrus operator — same thing in one line:
         with st.chat_message("user"):
             st.write(question)
         st.session_state.health_messages.append({
@@ -241,7 +427,7 @@ Be empathetic, clear, and practical.
 
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                answer = call_groq(system, question)
+                answer = call_groq(system, question, history=st.session_state.health_messages)
             st.write(answer)
 
         st.session_state.health_messages.append({
@@ -252,6 +438,16 @@ Be empathetic, clear, and practical.
 # TAB 3 — DIET PLAN
 # ════════════════════════════════════════════════════════
 with tab3:
+    p = st.session_state.get("profile", {})
+
+    if p:
+        st.success(f"👤 Generating plan for: **{p.get('name')}**")
+        # Pre-fill from profile
+        diet_type = p.get('diet_pref', 'Vegetarian')
+        cuisine   = p.get('cuisine', 'Indian')
+        allergies = p.get('allergies', [])
+        st.info(f"Using your profile: {diet_type} | {cuisine} cuisine | Allergies: {', '.join(allergies)}")
+
     st.subheader("🥗 Personalized Diet Plan")
 
     if "user_profile" not in st.session_state:
@@ -268,7 +464,8 @@ with tab3:
         col1, col2 = st.columns(2)
         with col1:
             diet_type  = st.selectbox("Diet Preference",
-                                       ["Vegetarian", "Non-Vegetarian", "Vegan"])
+                                       ["Vegetarian", "Non-Vegetarian", "Vegan"],
+                                       key="tab3_diet_type")
             cuisine    = st.selectbox("Cuisine", ["Indian", "Mediterranean",
                                                    "Asian", "Western"])
         with col2:
@@ -323,134 +520,100 @@ Format clearly with days and meals."""
 # TAB 4 — HEALTH TRACKER
 # ════════════════════════════════════════════════════════
 with tab4:
-    st.subheader("📊 Health Tracker")
-    st.caption("Track your blood sugar, BMI, exercise and medications")
+    p = st.session_state.get("profile", {})
+
+    if p:
+        st.success(f"👤 {p.get('name')}'s Health Tracker")
 
     tracker_tab1, tracker_tab2, tracker_tab3, tracker_tab4 = st.tabs([
         "🩸 Blood Sugar",
-        "⚖️ BMI Calculator",
-        "🏃 Exercise Plan",
-        "💊 Medication Notes"
+        "💊 Medications",
+        "🏃 Exercise",
+        "🥗 Food"
     ])
 
     # ════════════════════════════════════════════════════
-    # BLOOD SUGAR TRACKER
+    # BLOOD SUGAR TRACKER — unchanged
     # ════════════════════════════════════════════════════
     with tracker_tab1:
+        p = st.session_state.get("profile", {})
+        if p:
+            st.info(f"👤 {p.get('name')}'s targets — Fasting: {p.get('target_fasting')} mg/dL | Post-meal: {p.get('target_postmeal')} mg/dL")
+
         st.subheader("🩸 Blood Sugar Tracker")
 
-        # Initialize blood sugar log
         if "blood_sugar_log" not in st.session_state:
             st.session_state.blood_sugar_log = []
 
-        # Input form
         col1, col2, col3 = st.columns(3)
         with col1:
             bs_date  = st.date_input("Date", value=date.today())
         with col2:
             bs_time  = st.selectbox("When", [
-                "Fasting (morning)",
-                "Before breakfast",
-                "After breakfast",
-                "Before lunch",
-                "After lunch",
-                "Before dinner",
-                "After dinner",
-                "Bedtime"
+                "Fasting (morning)", "Before breakfast", "After breakfast",
+                "Before lunch", "After lunch", "Before dinner",
+                "After dinner", "Bedtime"
             ])
         with col3:
-            bs_value = st.number_input(
-                "Blood Sugar (mg/dL)",
-                min_value=50, max_value=600, value=120
-            )
+            bs_value = st.number_input("Blood Sugar (mg/dL)",
+                                        min_value=50, max_value=600, value=120)
 
         col1, col2 = st.columns(2)
         with col1:
             bs_notes = st.text_input("Notes (optional)",
-                                      placeholder="e.g. after exercise, skipped meal...")
+                                      placeholder="e.g. after exercise...")
         with col2:
             st.write("")
             st.write("")
             if st.button("➕ Log Reading", type="primary"):
                 st.session_state.blood_sugar_log.append({
-                    "date":  str(bs_date),
-                    "time":  bs_time,
-                    "value": bs_value,
-                    "notes": bs_notes
+                    "date": str(bs_date), "time": bs_time,
+                    "value": bs_value, "notes": bs_notes
                 })
                 st.success(f"✅ Logged: {bs_value} mg/dL")
 
-        # Blood sugar status
         def get_bs_status(value):
-            if value < 70:
-                return "⚠️ Low (Hypoglycemia)", "red"
-            elif value <= 100:
-                return "✅ Normal (Fasting)", "green"
-            elif value <= 125:
-                return "⚠️ Pre-diabetic range", "orange"
-            elif value <= 180:
-                return "⚠️ High (Post-meal)", "orange"
-            else:
-                return "🚨 Very High", "red"
+            if value < 70:   return "⚠️ Low (Hypoglycemia)", "red"
+            elif value <= 100: return "✅ Normal (Fasting)", "green"
+            elif value <= 125: return "⚠️ Pre-diabetic range", "orange"
+            elif value <= 180: return "⚠️ High (Post-meal)", "orange"
+            else:              return "🚨 Very High", "red"
 
         status, color = get_bs_status(bs_value)
-        st.markdown(f"**Current reading status:** :{color}[{status}]")
+        st.markdown(f"**Status:** :{color}[{status}]")
 
-        # Reference ranges
-        with st.expander("📋 Blood Sugar Reference Ranges"):
-            ref_data = {
-                "Condition": ["Normal fasting", "Pre-diabetes fasting",
-                               "Diabetes fasting", "Normal post-meal",
-                               "High post-meal"],
-                "Range (mg/dL)": ["70-100", "100-125", "126+",
-                                   "Less than 140", "140+"]
-            }
-            st.table(pd.DataFrame(ref_data))
+        with st.expander("📋 Reference Ranges"):
+            st.table(pd.DataFrame({
+                "Condition": ["Normal fasting", "Pre-diabetes",
+                               "Diabetes", "Normal post-meal", "High post-meal"],
+                "Range (mg/dL)": ["70-100", "100-125", "126+", "<140", "140+"]
+            }))
 
         st.divider()
 
-        # Show log + chart
         if st.session_state.blood_sugar_log:
-            st.subheader(f"📈 Your Readings ({len(st.session_state.blood_sugar_log)} logged)")
-
             df_log = pd.DataFrame(st.session_state.blood_sugar_log)
 
-            # Chart
             fig = go.Figure()
-
             fig.add_trace(go.Scatter(
-                x=list(range(len(df_log))),
-                y=df_log['value'],
-                mode='lines+markers',
-                name='Blood Sugar',
-                line=dict(color='#6366f1', width=2),
-                marker=dict(size=8)
+                x=list(range(len(df_log))), y=df_log['value'],
+                mode='lines+markers', name='Blood Sugar',
+                line=dict(color='#6366f1', width=2), marker=dict(size=8)
             ))
-
-            # Reference lines
-            fig.add_hline(y=100, line_dash="dash",
-                          line_color="green",
+            fig.add_hline(y=100, line_dash="dash", line_color="green",
                           annotation_text="Normal max (100)")
-            fig.add_hline(y=126, line_dash="dash",
-                          line_color="red",
+            fig.add_hline(y=126, line_dash="dash", line_color="red",
                           annotation_text="Diabetes threshold (126)")
-            fig.add_hline(y=180, line_dash="dash",
-                          line_color="orange",
+            fig.add_hline(y=180, line_dash="dash", line_color="orange",
                           annotation_text="Post-meal high (180)")
-
             fig.update_layout(
                 title="Blood Sugar Trend",
-                xaxis_title="Reading #",
-                yaxis_title="Blood Sugar (mg/dL)",
-                plot_bgcolor='rgba(0,0,0,0)',
-                paper_bgcolor='rgba(0,0,0,0)',
-                font=dict(color='white'),
-                height=400
+                xaxis_title="Reading #", yaxis_title="Blood Sugar (mg/dL)",
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                font=dict(color='white'), height=400
             )
-
             st.plotly_chart(fig, use_container_width=True)
 
-            # Stats
             values = df_log['value'].tolist()
             s1, s2, s3, s4 = st.columns(4)
             s1.metric("Average",  f"{sum(values)/len(values):.0f} mg/dL")
@@ -458,233 +621,438 @@ with tab4:
             s3.metric("Lowest",   f"{min(values)} mg/dL")
             s4.metric("Readings", len(values))
 
-            # Log table
-            st.subheader("📋 Reading History")
             st.dataframe(df_log, use_container_width=True)
-
-            if st.button("🗑️ Clear All Readings"):
+            if st.button("🗑️ Clear Readings"):
                 st.session_state.blood_sugar_log = []
                 st.rerun()
         else:
-            st.info("No readings logged yet. Add your first reading above!")
+            st.info("No readings logged yet.")
 
     # ════════════════════════════════════════════════════
-    # BMI CALCULATOR
+    # MEDICATION TRACKER — upgraded
     # ════════════════════════════════════════════════════
     with tracker_tab2:
-        st.subheader("⚖️ BMI Calculator")
+        st.subheader("💊 Medication Tracker")
+        st.caption("Track your medications and daily adherence")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            height_cm = st.number_input("Height (cm)",
-                                         min_value=100, max_value=250,
-                                         value=170)
-            weight_kg = st.number_input("Weight (kg)",
-                                         min_value=30, max_value=300,
-                                         value=70)
-
-            bmi_val = weight_kg / ((height_cm/100) ** 2)
-
-            def get_bmi_category(bmi):
-                if bmi < 18.5:
-                    return "Underweight", "#3b82f6"
-                elif bmi < 25:
-                    return "Normal", "#22c55e"
-                elif bmi < 30:
-                    return "Overweight", "#f59e0b"
-                else:
-                    return "Obese", "#ef4444"
-
-            category, cat_color = get_bmi_category(bmi_val)
-
-            st.metric("Your BMI", f"{bmi_val:.1f}")
-            st.markdown(f"**Category:** <span style='color:{cat_color}'>{category}</span>",
-                        unsafe_allow_html=True)
-
-            # Ideal weight range
-            ideal_min = 18.5 * ((height_cm/100) ** 2)
-            ideal_max = 24.9 * ((height_cm/100) ** 2)
-            st.info(f"Ideal weight for your height: **{ideal_min:.1f} - {ideal_max:.1f} kg**")
-
-        with col2:
-            # BMI Gauge
-            fig = go.Figure(go.Indicator(
-                mode="gauge+number",
-                value=bmi_val,
-                domain={'x': [0, 1], 'y': [0, 1]},
-                title={'text': "BMI", 'font': {'color': 'white'}},
-                gauge={
-                    'axis': {'range': [10, 45],
-                             'tickcolor': 'white',
-                             'tickfont': {'color': 'white'}},
-                    'bar':  {'color': cat_color},
-                    'steps': [
-                        {'range': [10, 18.5], 'color': '#3b82f6'},
-                        {'range': [18.5, 25], 'color': '#22c55e'},
-                        {'range': [25, 30],   'color': '#f59e0b'},
-                        {'range': [30, 45],   'color': '#ef4444'}
-                    ],
-                    'threshold': {
-                        'line': {'color': "white", 'width': 4},
-                        'thickness': 0.75,
-                        'value': bmi_val
-                    }
-                }
-            ))
-
-            fig.update_layout(
-                paper_bgcolor='rgba(0,0,0,0)',
-                font={'color': 'white'},
-                height=300
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-        # BMI table
-        with st.expander("📋 BMI Categories"):
-            bmi_table = {
-                "Category":    ["Underweight", "Normal", "Overweight", "Obese"],
-                "BMI Range":   ["Below 18.5", "18.5 - 24.9",
-                                "25.0 - 29.9", "30.0 and above"],
-                "Diabetes Risk": ["Low", "Low", "Moderate", "High"]
-            }
-            st.table(pd.DataFrame(bmi_table))
-
-    # ════════════════════════════════════════════════════
-    # EXERCISE PLAN
-    # ════════════════════════════════════════════════════
-    with tracker_tab3:
-        st.subheader("🏃 Exercise Recommendations")
-
-        fitness_level = st.selectbox("Your current fitness level",
-                                      ["Sedentary (little exercise)",
-                                       "Lightly active (1-3 days/week)",
-                                       "Moderately active (3-5 days/week)",
-                                       "Very active (6-7 days/week)"])
-
-        exercise_goal = st.selectbox("Your goal",
-                                      ["Lower blood sugar",
-                                       "Lose weight",
-                                       "Improve cardiovascular health",
-                                       "Increase energy levels"])
-
-        limitations = st.multiselect("Any physical limitations?",
-                                      ["Joint pain", "Back pain",
-                                       "Heart condition", "None"])
-
-        if st.button("🏃 Generate Exercise Plan", type="primary"):
-            risk = st.session_state.get('risk_level', 'Medium Risk')
-            prob = st.session_state.get('risk_prob', 0.5)
-
-            with st.spinner("Creating your exercise plan..."):
-                plan = call_groq(
-                    system="""You are a certified diabetes fitness coach.
-Create safe, practical exercise plans for diabetes patients.
-Always prioritize safety and recommend consulting a doctor.""",
-                    user=f"""Create a weekly exercise plan for:
-- Diabetes Risk: {risk} ({prob*100:.0f}%)
-- Fitness Level: {fitness_level}
-- Goal: {exercise_goal}
-- Limitations: {', '.join(limitations) if limitations else 'None'}
-
-Include:
-1. Weekly schedule (7 days)
-2. Specific exercises with duration
-3. Warm-up and cool-down
-4. How each exercise helps blood sugar
-5. Safety tips for diabetic patients
-
-Keep it practical and motivating."""
-                )
-
-            st.subheader("🏋️ Your Weekly Exercise Plan")
-            st.write(plan)
-
-            st.download_button(
-                "⬇️ Download Exercise Plan",
-                data=plan,
-                file_name="exercise_plan.txt",
-                mime="text/plain"
-            )
-
-    # ════════════════════════════════════════════════════
-    # MEDICATION NOTES
-    # ════════════════════════════════════════════════════
-    with tracker_tab4:
-        st.subheader("💊 Medication Notes")
-        st.caption("Keep track of your medications — always consult your doctor")
-
-        # Initialize
         if "medications" not in st.session_state:
             st.session_state.medications = []
+        if "med_log" not in st.session_state:
+            st.session_state.med_log = {}
 
-        # Add medication
-        st.subheader("➕ Add Medication")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            med_name = st.text_input("Medication Name",
-                                      placeholder="e.g. Metformin")
-        with col2:
-            med_dose = st.text_input("Dosage",
-                                      placeholder="e.g. 500mg")
-        with col3:
-            med_freq = st.selectbox("Frequency", [
-                "Once daily",
-                "Twice daily",
-                "Three times daily",
-                "With meals",
-                "Before meals",
-                "After meals",
-                "At bedtime"
-            ])
+        # ── Add Medication ───────────────────────────────
+        with st.expander("➕ Add New Medication", expanded=len(st.session_state.medications) == 0):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                med_name = st.text_input("Medication Name",
+                                          placeholder="e.g. Metformin",
+                                          key="med_name_input")
+            with col2:
+                med_dose = st.text_input("Dosage",
+                                          placeholder="e.g. 500mg",
+                                          key="med_dose_input")
+            with col3:
+                med_freq = st.selectbox("Frequency", [
+                    "Once daily", "Twice daily", "Three times daily",
+                    "With meals", "Before meals", "After meals", "At bedtime"
+                ], key="med_freq_input")
 
-        med_notes = st.text_input("Additional notes",
-                                   placeholder="e.g. take with food, avoid alcohol")
+            med_time = st.multiselect("Reminder Times",
+                                       ["Morning", "Afternoon",
+                                        "Evening", "Night"],
+                                       key="med_time_input")
+            med_notes = st.text_input("Notes",
+                                       placeholder="e.g. take with food",
+                                       key="med_notes_input")
 
-        if st.button("➕ Add Medication", type="primary"):
-            if med_name:
-                st.session_state.medications.append({
-                    "name":      med_name,
-                    "dose":      med_dose,
-                    "frequency": med_freq,
-                    "notes":     med_notes
-                })
-                st.success(f"✅ Added: {med_name}")
-            else:
-                st.error("Please enter medication name")
+            if st.button("➕ Add Medication", type="primary"):
+                if med_name:
+                    st.session_state.medications.append({
+                        "name":      med_name,
+                        "dose":      med_dose,
+                        "frequency": med_freq,
+                        "times":     med_time,
+                        "notes":     med_notes
+                    })
+                    st.success(f"✅ Added: {med_name}")
+                    st.rerun()
+                else:
+                    st.error("Please enter medication name")
 
-        # Show medications
+        # ── Today's Medications ──────────────────────────
         if st.session_state.medications:
-            st.divider()
-            st.subheader("💊 Your Medications")
+            st.subheader(f"📅 Today's Medications — {date.today().strftime('%d %b %Y')}")
 
+            today_key = str(date.today())
+            if today_key not in st.session_state.med_log:
+                st.session_state.med_log[today_key] = {}
+
+            taken_count = 0
             for i, med in enumerate(st.session_state.medications):
-                with st.expander(f"💊 {med['name']} — {med['dose']} — {med['frequency']}"):
-                    st.write(f"**Name:** {med['name']}")
-                    st.write(f"**Dose:** {med['dose']}")
-                    st.write(f"**Frequency:** {med['frequency']}")
-                    if med['notes']:
-                        st.write(f"**Notes:** {med['notes']}")
-                    if st.button(f"🗑️ Remove", key=f"remove_{i}"):
+                col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
+
+                with col1:
+                    st.write(f"💊 **{med['name']}** — {med['dose']}")
+                with col2:
+                    st.write(f"🕐 {med['frequency']}")
+                with col3:
+                    taken = st.checkbox(
+                        "✅ Taken",
+                        value=st.session_state.med_log[today_key].get(med['name'], False),
+                        key=f"taken_{today_key}_{i}"
+                    )
+                    st.session_state.med_log[today_key][med['name']] = taken
+                    if taken:
+                        taken_count += 1
+                with col4:
+                    if st.button("🗑️", key=f"del_med_{i}"):
                         st.session_state.medications.pop(i)
                         st.rerun()
 
-            # Download medication list
-            med_text = "My Medications\n" + "="*30 + "\n\n"
+            # Adherence today
+            total = len(st.session_state.medications)
+            adherence = (taken_count / total * 100) if total > 0 else 0
+            st.progress(adherence/100,
+                        text=f"Today's adherence: {taken_count}/{total} ({adherence:.0f}%)")
+
+            # ── Adherence Chart (last 7 days) ────────────
+            if len(st.session_state.med_log) > 1:
+                st.divider()
+                st.subheader("📈 7-Day Adherence")
+
+                dates      = []
+                adherences = []
+                for day_key, day_log in sorted(st.session_state.med_log.items())[-7:]:
+                    taken_day = sum(1 for v in day_log.values() if v)
+                    adh_pct   = (taken_day / total * 100) if total > 0 else 0
+                    dates.append(day_key)
+                    adherences.append(adh_pct)
+
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    x=dates, y=adherences,
+                    marker_color=['#22c55e' if a >= 80 else '#f59e0b'
+                                  if a >= 50 else '#ef4444' for a in adherences],
+                    name='Adherence %'
+                ))
+                fig.update_layout(
+                    title="Medication Adherence (Last 7 Days)",
+                    yaxis=dict(range=[0, 100], title="Adherence %"),
+                    xaxis_title="Date",
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='white'),
+                    height=300
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Download
+            med_text = f"Medication List — {date.today()}\n" + "="*30 + "\n\n"
             for med in st.session_state.medications:
                 med_text += f"• {med['name']} — {med['dose']} — {med['frequency']}\n"
                 if med['notes']:
                     med_text += f"  Notes: {med['notes']}\n"
-                med_text += "\n"
-            med_text += "\n⚠️ Always consult your doctor before changing medications."
-
-            st.download_button(
-                "⬇️ Download Medication List",
-                data=med_text,
-                file_name="my_medications.txt",
-                mime="text/plain"
-            )
+            st.download_button("⬇️ Download List", data=med_text,
+                                file_name="medications.txt", mime="text/plain")
         else:
-            st.info("No medications added yet.")
+            st.info("No medications added yet. Add your first medication above.")
 
-        st.divider()
-        st.warning("⚠️ This is for personal tracking only. Always follow your doctor's prescription.")
+        st.warning("⚠️ Always follow your doctor's prescription.")
+
+    # ════════════════════════════════════════════════════
+    # EXERCISE TRACKER — upgraded
+    # ════════════════════════════════════════════════════
+    with tracker_tab3:
+        st.subheader("🏃 Exercise Tracker")
+        st.caption("Log your daily exercise and track your progress")
+
+        if "exercise_log" not in st.session_state:
+            st.session_state.exercise_log = []
+
+        # ── Log Exercise ─────────────────────────────────
+        st.subheader("➕ Log Today's Exercise")
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            ex_date = st.date_input("Date",
+                                     value=date.today(),
+                                     key="ex_date")
+            ex_type = st.selectbox("Exercise Type", [
+                "Walking", "Jogging", "Running", "Cycling",
+                "Swimming", "Yoga", "Strength Training",
+                "Stretching", "Dancing", "Other"
+            ])
+        with col2:
+            ex_duration = st.number_input("Duration (minutes)",
+                                           min_value=5, max_value=300,
+                                           value=30, key="ex_duration")
+            ex_intensity = st.selectbox("Intensity",
+                                         ["Light", "Moderate", "Intense"])
+        with col3:
+            ex_calories = st.number_input("Calories Burned (approx)",
+                                           min_value=0, max_value=2000,
+                                           value=150, key="ex_calories")
+            ex_bs_before = st.number_input("Blood Sugar Before (optional)",
+                                            min_value=0, max_value=600,
+                                            value=0, key="ex_bs_before",
+                                            help="0 = not measured")
+            ex_bs_after  = st.number_input("Blood Sugar After (optional)",
+                                            min_value=0, max_value=600,
+                                            value=0, key="ex_bs_after",
+                                            help="0 = not measured")
+
+        ex_notes = st.text_input("Notes", placeholder="How did it feel?",
+                                  key="ex_notes")
+
+        if st.button("➕ Log Exercise", type="primary"):
+            st.session_state.exercise_log.append({
+                "date":       str(ex_date),
+                "type":       ex_type,
+                "duration":   ex_duration,
+                "intensity":  ex_intensity,
+                "calories":   ex_calories,
+                "bs_before":  ex_bs_before,
+                "bs_after":   ex_bs_after,
+                "notes":      ex_notes
+            })
+            st.success(f"✅ Logged: {ex_duration} min {ex_type}")
+            st.rerun()
+
+        # ── Stats + Chart ────────────────────────────────
+        if st.session_state.exercise_log:
+            df_ex = pd.DataFrame(st.session_state.exercise_log)
+
+            # Summary stats
+            total_mins = df_ex['duration'].sum()
+            total_cals = df_ex['calories'].sum()
+            avg_mins   = df_ex['duration'].mean()
+            streak     = 0
+            dates_set  = set(df_ex['date'].tolist())
+            check_date = date.today()
+            while str(check_date) in dates_set:
+                streak    += 1
+                check_date = check_date.replace(day=check_date.day - 1)
+
+            e1, e2, e3, e4 = st.columns(4)
+            e1.metric("Total Minutes",   f"{total_mins}")
+            e2.metric("Calories Burned", f"{total_cals}")
+            e3.metric("Avg per Session", f"{avg_mins:.0f} min")
+            e4.metric("🔥 Streak",       f"{streak} days")
+
+            st.divider()
+
+            # Weekly chart
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=df_ex['date'].tolist()[-7:],
+                y=df_ex['duration'].tolist()[-7:],
+                marker_color='#6366f1',
+                name='Duration (min)'
+            ))
+            fig.add_hline(y=30, line_dash="dash",
+                          line_color="green",
+                          annotation_text="Recommended 30 min")
+            fig.update_layout(
+                title="Exercise Log (Last 7 Sessions)",
+                xaxis_title="Date",
+                yaxis_title="Duration (minutes)",
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                font=dict(color='white'),
+                height=300
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Blood sugar impact
+            bs_data = df_ex[(df_ex['bs_before'] > 0) & (df_ex['bs_after'] > 0)]
+            if len(bs_data) > 0:
+                st.subheader("📉 Exercise Impact on Blood Sugar")
+                for _, row in bs_data.iterrows():
+                    diff  = row['bs_after'] - row['bs_before']
+                    color = "green" if diff < 0 else "red"
+                    st.markdown(
+                        f"**{row['date']}** — {row['type']}: "
+                        f"{row['bs_before']} → {row['bs_after']} "
+                        f"(:{color}[{diff:+.0f} mg/dL])"
+                    )
+
+            # Log table
+            with st.expander("📋 Full Exercise History"):
+                st.dataframe(df_ex, use_container_width=True)
+
+            col1, col2 = st.columns(2)
+            with col1:
+                ex_text = f"Exercise Log\n{'='*30}\n\n"
+                for _, row in df_ex.iterrows():
+                    ex_text += f"{row['date']} — {row['type']} — {row['duration']}min — {row['calories']} cal\n"
+                st.download_button("⬇️ Download Log",
+                                    data=ex_text,
+                                    file_name="exercise_log.txt",
+                                    mime="text/plain")
+            with col2:
+                if st.button("🗑️ Clear Exercise Log"):
+                    st.session_state.exercise_log = []
+                    st.rerun()
+        else:
+            st.info("No exercise logged yet. Log your first session above!")
+
+    # ════════════════════════════════════════════════════
+    # FOOD TRACKER — new
+    # ════════════════════════════════════════════════════
+    with tracker_tab4:
+        st.subheader("🥗 Food Tracker")
+        st.caption("Track meals, carbs and glycemic index")
+
+        if "food_log" not in st.session_state:
+            st.session_state.food_log = []
+
+        # Glycemic index reference
+        GI_DATA = {
+            "White rice":        {"gi": 72, "carbs": 45, "category": "High GI"},
+            "Brown rice":        {"gi": 50, "carbs": 42, "category": "Medium GI"},
+            "White bread":       {"gi": 75, "carbs": 15, "category": "High GI"},
+            "Whole wheat bread": {"gi": 50, "carbs": 12, "category": "Medium GI"},
+            "Oats":              {"gi": 55, "carbs": 27, "category": "Medium GI"},
+            "Apple":             {"gi": 36, "carbs": 25, "category": "Low GI"},
+            "Banana":            {"gi": 51, "carbs": 27, "category": "Medium GI"},
+            "Idli":              {"gi": 35, "carbs": 20, "category": "Low GI"},
+            "Dosa":              {"gi": 52, "carbs": 30, "category": "Medium GI"},
+            "Dal":               {"gi": 25, "carbs": 20, "category": "Low GI"},
+            "Chapati":           {"gi": 52, "carbs": 18, "category": "Medium GI"},
+            "Poha":              {"gi": 55, "carbs": 35, "category": "Medium GI"},
+            "Upma":              {"gi": 50, "carbs": 30, "category": "Medium GI"},
+            "Milk":              {"gi": 31, "carbs": 12, "category": "Low GI"},
+            "Curd/Yogurt":       {"gi": 36, "carbs": 6,  "category": "Low GI"},
+            "Potato":            {"gi": 78, "carbs": 30, "category": "High GI"},
+            "Sweet potato":      {"gi": 55, "carbs": 24, "category": "Medium GI"},
+            "Watermelon":        {"gi": 72, "carbs": 8,  "category": "High GI"},
+            "Mango":             {"gi": 56, "carbs": 25, "category": "Medium GI"},
+        }
+
+        # ── Log Meal ─────────────────────────────────────
+        st.subheader("➕ Log a Meal")
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            food_date  = st.date_input("Date", value=date.today(), key="food_date")
+            meal_type  = st.selectbox("Meal", [
+                "Breakfast", "Morning Snack", "Lunch",
+                "Evening Snack", "Dinner", "Late Night"
+            ])
+        with col2:
+            food_item  = st.text_input("Food Item",
+                                        placeholder="e.g. Brown rice, Dal...")
+            portion    = st.selectbox("Portion Size",
+                                       ["Small (0.5x)", "Medium (1x)",
+                                        "Large (1.5x)", "Extra Large (2x)"])
+        with col3:
+            carbs      = st.number_input("Carbs (g)",
+                                          min_value=0, max_value=500, value=30,
+                                          key="food_carbs")
+            calories   = st.number_input("Calories (approx)",
+                                          min_value=0, max_value=2000, value=200,
+                                          key="food_calories")
+
+        # GI lookup
+        selected_gi_food = st.selectbox(
+            "Or lookup GI from common foods:",
+            ["-- Select --"] + list(GI_DATA.keys())
+        )
+
+        if selected_gi_food != "-- Select --":
+            gi_info = GI_DATA[selected_gi_food]
+            g1, g2, g3 = st.columns(3)
+            g1.metric("Glycemic Index", gi_info['gi'])
+            g2.metric("Carbs per serving", f"{gi_info['carbs']}g")
+            g3.metric("Category", gi_info['category'])
+
+        if st.button("➕ Log Meal", type="primary"):
+            gi_val = GI_DATA.get(selected_gi_food, {}).get('gi', 0) \
+                     if selected_gi_food != "-- Select --" else 0
+            gi_cat = GI_DATA.get(selected_gi_food, {}).get('category', 'Unknown') \
+                     if selected_gi_food != "-- Select --" else 'Unknown'
+
+            st.session_state.food_log.append({
+                "date":     str(food_date),
+                "meal":     meal_type,
+                "food":     food_item if food_item else selected_gi_food,
+                "portion":  portion,
+                "carbs":    carbs,
+                "calories": calories,
+                "gi":       gi_val,
+                "gi_cat":   gi_cat
+            })
+            st.success(f"✅ Logged: {meal_type} — {food_item or selected_gi_food}")
+            st.rerun()
+
+        # ── GI Reference Table ───────────────────────────
+        with st.expander("📋 Glycemic Index Guide"):
+            gi_df = pd.DataFrame([
+                {"Food": k, "GI": v['gi'],
+                 "Carbs/serving": f"{v['carbs']}g",
+                 "Category": v['category']}
+                for k, v in GI_DATA.items()
+            ]).sort_values('GI')
+            st.dataframe(gi_df, use_container_width=True)
+
+        # ── Today's Summary ──────────────────────────────
+        if st.session_state.food_log:
+            df_food   = pd.DataFrame(st.session_state.food_log)
+            today_str = str(date.today())
+            today_food = df_food[df_food['date'] == today_str]
+
+            st.divider()
+            st.subheader(f"📊 Today's Summary — {date.today().strftime('%d %b %Y')}")
+
+            if not today_food.empty:
+                f1, f2, f3, f4 = st.columns(4)
+                f1.metric("Total Carbs",    f"{today_food['carbs'].sum()}g")
+                f2.metric("Total Calories", today_food['calories'].sum())
+                f3.metric("Meals Logged",   len(today_food))
+                avg_gi = today_food[today_food['gi'] > 0]['gi'].mean()
+                f4.metric("Avg GI",         f"{avg_gi:.0f}" if avg_gi > 0 else "N/A")
+
+                # Flag high GI foods
+                high_gi = today_food[today_food['gi'] >= 70]
+                if not high_gi.empty:
+                    st.warning(f"⚠️ High GI foods today: {', '.join(high_gi['food'].tolist())}")
+
+                # Carbs chart
+                fig = go.Figure(go.Bar(
+                    x=today_food['meal'],
+                    y=today_food['carbs'],
+                    marker_color=['#22c55e' if c < 30 else
+                                  '#f59e0b' if c < 60 else
+                                  '#ef4444' for c in today_food['carbs']],
+                    name='Carbs (g)'
+                ))
+                fig.update_layout(
+                    title="Carbs per Meal Today",
+                    xaxis_title="Meal",
+                    yaxis_title="Carbs (g)",
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='white'),
+                    height=300
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Full log
+            with st.expander("📋 Full Food History"):
+                st.dataframe(df_food, use_container_width=True)
+
+            col1, col2 = st.columns(2)
+            with col1:
+                food_text = f"Food Log\n{'='*30}\n\n"
+                for _, row in df_food.iterrows():
+                    food_text += f"{row['date']} — {row['meal']}: {row['food']} — {row['carbs']}g carbs — {row['calories']} cal\n"
+                st.download_button("⬇️ Download Food Log",
+                                    data=food_text,
+                                    file_name="food_log.txt",
+                                    mime="text/plain")
+            with col2:
+                if st.button("🗑️ Clear Food Log"):
+                    st.session_state.food_log = []
+                    st.rerun()
+        else:
+            st.info("No meals logged yet. Log your first meal above!")
