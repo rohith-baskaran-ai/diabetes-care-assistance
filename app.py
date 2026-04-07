@@ -1,3 +1,4 @@
+import io
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -11,6 +12,7 @@ from dotenv import load_dotenv
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, date 
+
 
 load_dotenv()
 
@@ -69,6 +71,137 @@ def call_groq(system, user, history=None):
     )
     return response.choices[0].message.content
 
+def generate_health_report(profile, risk_data, bs_log, med_log, exercise_log, food_log):
+
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+    import io
+    buffer = io.BytesIO()
+    doc    = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    story  = []
+
+    # Title
+    story.append(Paragraph("🏥 Diabetes Care Health Report", styles['Title']))
+    story.append(Paragraph(f"Generated: {date.today().strftime('%d %B %Y')}", styles['Normal']))
+    story.append(Spacer(1, 20))
+
+    # Patient Info
+    story.append(Paragraph("Patient Information", styles['Heading1']))
+    if profile:
+        patient_data = [
+            ["Name", profile.get('name', 'N/A')],
+            ["Age", str(profile.get('age', 'N/A'))],
+            ["Gender", profile.get('gender', 'N/A')],
+            ["Diabetes Status", profile.get('diabetes_type', 'N/A')],
+            ["BMI", str(profile.get('bmi', 'N/A'))],
+            ["Diet Preference", profile.get('diet_pref', 'N/A')],
+        ]
+        t = Table(patient_data, colWidths=[2*inch, 4*inch])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (0,-1), colors.lightblue),
+            ('FONTNAME', (0,0), (-1,-1), 'Helvetica'),
+            ('FONTSIZE', (0,0), (-1,-1), 10),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+            ('PADDING', (0,0), (-1,-1), 6),
+        ]))
+        story.append(t)
+    story.append(Spacer(1, 20))
+
+    # Risk Assessment
+    story.append(Paragraph("Risk Assessment", styles['Heading1']))
+    if risk_data:
+        story.append(Paragraph(
+            f"Risk Level: {risk_data.get('level', 'N/A')} "
+            f"({risk_data.get('prob', 0)*100:.1f}% probability)",
+            styles['Normal']
+        ))
+    else:
+        story.append(Paragraph("No assessment completed yet.", styles['Normal']))
+    story.append(Spacer(1, 20))
+
+    # Blood Sugar Summary
+    story.append(Paragraph("Blood Sugar Summary", styles['Heading1']))
+    if bs_log:
+        values  = [r['value'] for r in bs_log]
+        avg_bs  = sum(values) / len(values)
+        # A1C estimation
+        a1c_est = (avg_bs + 46.7) / 28.7
+        bs_summary = [
+            ["Total Readings", str(len(bs_log))],
+            ["Average Blood Sugar", f"{avg_bs:.0f} mg/dL"],
+            ["Highest Reading", f"{max(values)} mg/dL"],
+            ["Lowest Reading", f"{min(values)} mg/dL"],
+            ["Estimated A1C", f"{a1c_est:.1f}%"],
+        ]
+        t = Table(bs_summary, colWidths=[2*inch, 4*inch])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (0,-1), colors.lightyellow),
+            ('FONTNAME', (0,0), (-1,-1), 'Helvetica'),
+            ('FONTSIZE', (0,0), (-1,-1), 10),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+            ('PADDING', (0,0), (-1,-1), 6),
+        ]))
+        story.append(t)
+    else:
+        story.append(Paragraph("No blood sugar readings logged.", styles['Normal']))
+    story.append(Spacer(1, 20))
+
+    # Medications
+    story.append(Paragraph("Current Medications", styles['Heading1']))
+    if med_log:
+        for med in med_log:
+            story.append(Paragraph(
+                f"• {med['name']} — {med['dose']} — {med['frequency']}",
+                styles['Normal']
+            ))
+    else:
+        story.append(Paragraph("No medications logged.", styles['Normal']))
+    story.append(Spacer(1, 20))
+
+    # Exercise Summary
+    story.append(Paragraph("Exercise Summary", styles['Heading1']))
+    if exercise_log:
+        total_mins = sum(r['duration'] for r in exercise_log)
+        total_cals = sum(r['calories'] for r in exercise_log)
+        story.append(Paragraph(
+            f"Total sessions: {len(exercise_log)} | "
+            f"Total minutes: {total_mins} | "
+            f"Total calories: {total_cals}",
+            styles['Normal']
+        ))
+    else:
+        story.append(Paragraph("No exercise logged.", styles['Normal']))
+    story.append(Spacer(1, 20))
+
+    # Food Summary
+    story.append(Paragraph("Nutrition Summary", styles['Heading1']))
+    if food_log:
+        total_carbs = sum(r['carbs'] for r in food_log)
+        total_cals  = sum(r['calories'] for r in food_log)
+        avg_gi      = sum(r['gi'] for r in food_log if r['gi'] > 0)
+        story.append(Paragraph(
+            f"Total meals logged: {len(food_log)} | "
+            f"Total carbs: {total_carbs}g | "
+            f"Total calories: {total_cals}",
+            styles['Normal']
+        ))
+    else:
+        story.append(Paragraph("No food logged.", styles['Normal']))
+
+    story.append(Spacer(1, 30))
+    story.append(Paragraph(
+        "⚠️ This report is for personal tracking only. "
+        "Always consult your doctor for medical advice.",
+        styles['Normal']
+    ))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
 # ─── HEADER ─────────────────────────────────────────────
 st.markdown("""
 <h1 style='text-align:center; color:#6366f1'>
@@ -82,12 +215,13 @@ AI-powered diabetes risk assessment + personalized health guidance
 st.divider()
 
 # ─── TABS ───────────────────────────────────────────────
-tab0, tab1, tab2, tab3, tab4 = st.tabs([
+tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "👤 My Profile",
     "🔍 Risk Assessment",
     "💬 Health Assistant",
     "🥗 Diet Plan",
-    "📊 Health Tracker"
+    "📊 Health Tracker",
+    "📈 Dashboard"
 ])
 
 # ════════════════════════════════════════════════════════
@@ -1056,3 +1190,202 @@ with tab4:
                     st.rerun()
         else:
             st.info("No meals logged yet. Log your first meal above!")
+
+
+
+# ════════════════════════════════════════════════════════
+# TAB 5 — DASHBOARD
+# ════════════════════════════════════════════════════════
+with tab5:
+    p = st.session_state.get("profile", {})
+
+    if p:
+        st.markdown(f"## 👋 Welcome back, {p.get('name')}!")
+    else:
+        st.markdown("## 📈 Health Dashboard")
+        st.warning("Complete your profile for personalized insights")
+
+    st.caption(f"Today: {date.today().strftime('%A, %d %B %Y')}")
+    st.divider()
+
+    # ── Overview Metrics ─────────────────────────────────
+    st.subheader("📊 Today's Overview")
+
+    bs_log       = st.session_state.get("blood_sugar_log", [])
+    med_list     = st.session_state.get("medications", [])
+    med_log      = st.session_state.get("med_log", {})
+    exercise_log = st.session_state.get("exercise_log", [])
+    food_log     = st.session_state.get("food_log", [])
+
+    today_str    = str(date.today())
+    today_bs     = [r for r in bs_log if r['date'] == today_str]
+    today_ex     = [r for r in exercise_log if r['date'] == today_str]
+    today_food   = [r for r in food_log if r['date'] == today_str]
+    today_meds   = med_log.get(today_str, {})
+    meds_taken   = sum(1 for v in today_meds.values() if v)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("🩸 BS Readings",    len(today_bs),
+              f"Avg: {sum(r['value'] for r in today_bs)/len(today_bs):.0f}" if today_bs else "No readings")
+    c2.metric("💊 Meds Taken",     f"{meds_taken}/{len(med_list)}",
+              "✅ All done!" if meds_taken == len(med_list) and len(med_list) > 0 else "")
+    c3.metric("🏃 Exercise",       f"{sum(r['duration'] for r in today_ex)} min",
+              f"{len(today_ex)} session(s)")
+    c4.metric("🥗 Meals Logged",   len(today_food),
+              f"{sum(r['carbs'] for r in today_food)}g carbs")
+    c5.metric("🎯 Risk Level",
+              st.session_state.get('risk_level', 'Not assessed'), "")
+
+    st.divider()
+
+    # ── A1C Estimator ────────────────────────────────────
+    st.subheader("🔬 A1C Estimator")
+    st.caption("Estimated from your average blood sugar readings")
+
+    if bs_log:
+        values  = [r['value'] for r in bs_log]
+        avg_bs  = sum(values) / len(values)
+        a1c_est = (avg_bs + 46.7) / 28.7
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Average Blood Sugar", f"{avg_bs:.0f} mg/dL",
+                    f"from {len(values)} readings")
+        col2.metric("Estimated A1C",       f"{a1c_est:.1f}%")
+
+        if a1c_est < 5.7:
+            col3.metric("A1C Category", "Normal ✅")
+        elif a1c_est < 6.5:
+            col3.metric("A1C Category", "Pre-diabetes ⚠️")
+        else:
+            col3.metric("A1C Category", "Diabetes range 🚨")
+
+        # A1C gauge
+        fig = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=a1c_est,
+            number={'suffix': "%"},
+            domain={'x': [0, 1], 'y': [0, 1]},
+            title={'text': "Estimated A1C", 'font': {'color': 'white'}},
+            gauge={
+                'axis': {'range': [4, 12],
+                         'tickcolor': 'white',
+                         'tickfont': {'color': 'white'}},
+                'bar':  {'color': '#6366f1'},
+                'steps': [
+                    {'range': [4, 5.7],  'color': '#22c55e'},
+                    {'range': [5.7, 6.5],'color': '#f59e0b'},
+                    {'range': [6.5, 12], 'color': '#ef4444'}
+                ],
+                'threshold': {
+                    'line': {'color': "white", 'width': 4},
+                    'thickness': 0.75,
+                    'value': a1c_est
+                }
+            }
+        ))
+        fig.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            font={'color': 'white'},
+            height=300
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander("ℹ️ About A1C"):
+            st.write("""
+**A1C (HbA1c)** measures your average blood sugar over 2-3 months.
+
+| A1C Level | Category |
+|-----------|----------|
+| Below 5.7% | Normal |
+| 5.7% - 6.4% | Pre-diabetes |
+| 6.5% and above | Diabetes |
+
+⚠️ This is an **estimate** based on your logged readings.
+Get a proper A1C test from your doctor for accurate results.
+            """)
+    else:
+        st.info("Log blood sugar readings to see your estimated A1C")
+
+    st.divider()
+
+    # ── Weekly Charts ─────────────────────────────────────
+    if bs_log or exercise_log:
+        st.subheader("📈 Weekly Trends")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            if bs_log:
+                last7_bs = [r for r in bs_log][-7:]
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=list(range(len(last7_bs))),
+                    y=[r['value'] for r in last7_bs],
+                    mode='lines+markers',
+                    line=dict(color='#6366f1', width=2),
+                    name='Blood Sugar'
+                ))
+                fig.add_hline(y=126, line_dash="dash",
+                              line_color="red", annotation_text="126")
+                fig.update_layout(
+                    title="Blood Sugar Trend",
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='white'),
+                    height=250
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+        with col2:
+            if exercise_log:
+                last7_ex = exercise_log[-7:]
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    x=[r['date'] for r in last7_ex],
+                    y=[r['duration'] for r in last7_ex],
+                    marker_color='#22c55e',
+                    name='Exercise (min)'
+                ))
+                fig.add_hline(y=30, line_dash="dash",
+                              line_color="yellow",
+                              annotation_text="30 min goal")
+                fig.update_layout(
+                    title="Exercise Duration",
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='white'),
+                    height=250
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    # ── Health Report Download ────────────────────────────
+    st.subheader("📄 Download Health Report")
+    st.write("Get a complete PDF report of your health data.")
+
+    if st.button("📄 Generate Health Report", type="primary"):
+        risk_data = None
+        if 'risk_level' in st.session_state:
+            risk_data = {
+                'level': st.session_state.risk_level,
+                'prob':  st.session_state.risk_prob
+            }
+
+        with st.spinner("Generating your health report..."):
+            pdf_buffer = generate_health_report(
+                profile=st.session_state.get("profile"),
+                risk_data=risk_data,
+                bs_log=bs_log,
+                med_log=med_list,
+                exercise_log=exercise_log,
+                food_log=food_log
+            )
+
+        st.download_button(
+            label="⬇️ Download PDF Report",
+            data=pdf_buffer,
+            file_name=f"health_report_{date.today()}.pdf",
+            mime="application/pdf"
+        )
+        st.success("✅ Report ready! Click above to download.")
