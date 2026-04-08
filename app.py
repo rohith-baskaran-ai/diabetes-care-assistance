@@ -51,10 +51,9 @@ def get_risk_level(prob):
     else:
         return "High Risk", "red"
 
-def call_groq(system, user, history=None):
+def call_groq(system, user, history=None, max_tokens=1000):
     messages = [{"role": "system", "content": system}]
     
-    # add last 10 messages if history exists
     if history:
         for msg in history[-10:]:
             messages.append({
@@ -67,7 +66,7 @@ def call_groq(system, user, history=None):
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=messages,
-        max_tokens=1000
+        max_tokens=max_tokens  # ← use parameter
     )
     return response.choices[0].message.content
 
@@ -571,85 +570,521 @@ Be empathetic, clear, and practical.
 # ════════════════════════════════════════════════════════
 # TAB 3 — DIET PLAN
 # ════════════════════════════════════════════════════════
+
 with tab3:
     p = st.session_state.get("profile", {})
 
+    # show profile banner
     if p:
-        st.success(f"👤 Generating plan for: **{p.get('name')}**")
-        # Pre-fill from profile
-        diet_type = p.get('diet_pref', 'Vegetarian')
-        cuisine   = p.get('cuisine', 'Indian')
-        allergies = p.get('allergies', [])
-        st.info(f"Using your profile: {diet_type} | {cuisine} cuisine | Allergies: {', '.join(allergies)}")
+        st.success(
+            f"👤 {p.get('name')} | {p.get('diabetes_type')} | "
+            f"BMI: {p.get('bmi')} | {p.get('diet_pref')} | "
+            f"{p.get('cuisine')} cuisine"
+        )
 
     st.subheader("🥗 Personalized Diet Plan")
 
-    if "user_profile" not in st.session_state:
-        st.warning("⚠️ Please complete the Risk Assessment first to get a personalized diet plan.")
-        st.info("Go to the 🔍 Risk Assessment tab and click 'Assess My Risk'")
-    else:
-        p          = st.session_state.user_profile
-        risk_level = st.session_state.risk_level
-        prob       = st.session_state.risk_prob
+    # initialize session state
+    if "diet_chat"        not in st.session_state:
+        st.session_state.diet_chat        = []
+    if "diet_preferences" not in st.session_state:
+        st.session_state.diet_preferences = {}
+    if "weekly_plan"      not in st.session_state:
+        st.session_state.weekly_plan      = []
+    if "plan_generated"   not in st.session_state:
+        st.session_state.plan_generated   = False
+    if "plan_ready"       not in st.session_state:
+        st.session_state.plan_ready       = False
 
-        st.success(f"Generating plan for: **{risk_level}** ({prob*100:.1f}% risk)")
+    
+    # debug — add here after initialization
+    st.write(f"DEBUG — generated: {st.session_state.plan_generated} | "
+         f"ready: {st.session_state.plan_ready} | "
+         f"plan: {len(st.session_state.weekly_plan)} days")
 
-        # Diet preferences
-        col1, col2 = st.columns(2)
-        with col1:
-            diet_type  = st.selectbox("Diet Preference",
-                                       ["Vegetarian", "Non-Vegetarian", "Vegan"],
-                                       key="tab3_diet_type")
-            cuisine    = st.selectbox("Cuisine", ["Indian", "Mediterranean",
-                                                   "Asian", "Western"])
-        with col2:
-            allergies  = st.multiselect("Allergies/Restrictions",
-                                         ["Gluten", "Dairy", "Nuts",
-                                          "Soy", "Eggs", "None"])
-            meals_per_day = st.selectbox("Meals per day", [3, 4, 5, 6])
+    # ── STEP 1: Setup Chat ───────────────────────────────
+    if not st.session_state.plan_generated:
 
-        if st.button("🥗 Generate My Diet Plan", type="primary"):
-            with st.spinner("Creating your personalized diet plan..."):
-                plan = call_groq(
-                    system="""You are a certified diabetes nutritionist.
-Create detailed, practical meal plans for diabetes patients.
-Focus on low glycemic index foods, portion control, and balanced nutrition.
-Always include specific Indian/regional food options when relevant.""",
-                    user=f"""Create a personalized 7-day meal plan for:
+        st.markdown("### 💬 Step 1 — Tell me your preferences")
+        st.caption("Chat with the AI to set up your personalized meal plan")
+
+        # build system prompt for diet setup
+        risk_level = st.session_state.get('risk_level', 'Medium Risk')
+        risk_prob  = st.session_state.get('risk_prob', 0.5)
+
+        setup_system = f"""You are a friendly diabetes nutritionist helping set up
+a personalized meal plan for a patient.
 
 Patient Profile:
-- Glucose: {p['Glucose']} mg/dL
-- BMI: {p['BMI']}
-- Age: {p['Age']}
-- Risk Level: {risk_level} ({prob*100:.1f}% probability)
+- Name: {p.get('name', 'Patient')}
+- Age: {p.get('age', 'Unknown')}
+- Diabetes Status: {p.get('diabetes_type', 'Unknown')}
+- BMI: {p.get('bmi', 'Unknown')}
+- Risk Level: {risk_level} ({risk_prob*100:.0f}%)
+- Diet: {p.get('diet_pref', 'Vegetarian')}
+- Cuisine: {p.get('cuisine', 'Indian')}
+- Allergies: {', '.join(p.get('allergies', ['None']))}
+- Conditions: {', '.join(p.get('conditions', ['None']))}
 
-Preferences:
-- Diet type: {diet_type}
-- Cuisine: {cuisine}
-- Allergies: {', '.join(allergies) if allergies else 'None'}
-- Meals per day: {meals_per_day}
+Your job:
+1. Greet them and ask these 6 questions ONE AT A TIME:
+   Q1: How many meals per day? (suggest 4-5 for diabetics)
+   Q2: Wake up and sleep time?
+   Q3: Favourite foods to include?
+   Q4: Foods to absolutely avoid?
+   Q5: How much cooking time available per meal?
+   Q6: Any specific health goal this week?
 
-Include:
-1. 7-day meal plan with breakfast, lunch, dinner, snacks
-2. Foods to avoid
-3. Foods to eat more of
-4. Portion size tips
-5. One diabetes-friendly recipe
+2. After all answers — summarize preferences clearly
+3. End with: "Ready to generate your 7-day plan? 
+   Type 'yes' or click Generate below!"
 
-Format clearly with days and meals."""
-                )
+Be friendly, give suggestions based on their profile.
+Keep responses concise — max 3 sentences per message."""
 
-            st.subheader("📋 Your 7-Day Diet Plan")
-            st.write(plan)
+        # show welcome message on first load
+        if not st.session_state.diet_chat:
+            with st.chat_message("assistant"):
+                welcome = f"""Hi {p.get('name', 'there')}! 👋 Let's create your 
+personalized 7-day diabetes meal plan.
 
-            # Download
-            st.download_button(
-                label="⬇️ Download Diet Plan",
-                data=plan,
-                file_name=f"diabetes_diet_plan_{risk_level.lower().replace(' ','_')}.txt",
-                mime="text/plain"
+I'll ask you a few quick questions to make it perfect for you.
+Based on your {p.get('diet_pref', 'diet')} preference and 
+{risk_level}, I'll suggest the best options.
+
+**How many meals per day do you prefer?**
+For diabetics, I recommend **4-5 smaller meals** to keep 
+blood sugar stable. What works for you?"""
+                st.write(welcome)
+            st.session_state.diet_chat.append({
+                "role": "assistant", "content": welcome
+            })
+
+        # show chat history
+        for msg in st.session_state.diet_chat[1:]:
+            with st.chat_message(msg["role"]):
+                st.write(msg["content"])
+
+        # chat input
+        col1, col2 = st.columns([4, 1])
+        with col2:
+            if st.button("🔄 Start Over", key="diet_reset"):
+                st.session_state.diet_chat        = []
+                st.session_state.diet_preferences = {}
+                st.session_state.plan_generated   = False
+                st.session_state.plan_ready       = False
+                st.rerun()
+
+        if user_msg := st.chat_input("Type your answer...",
+                                      key="diet_chat_input"):
+            # show user message
+            with st.chat_message("user"):
+                st.write(user_msg)
+            st.session_state.diet_chat.append({
+                "role": "user", "content": user_msg
+            })
+
+            # get LLM response
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking..."):
+                    response = call_groq(
+                        system=setup_system,
+                        user=user_msg,
+                        history=st.session_state.diet_chat[:-1]
+                    )
+                st.write(response)
+            st.session_state.diet_chat.append({
+                "role": "assistant", "content": response
+            })
+
+            # check if patient said yes/ready
+            if any(word in user_msg.lower() for word in
+                   ["yes", "ready", "generate", "ok", "sure", "proceed"]):
+                st.session_state.plan_ready = True
+                st.rerun()
+
+        # generate button
+        # show generate button after enough conversation
+        if len(st.session_state.diet_chat) >= 6 or st.session_state.plan_ready:
+            st.divider()
+            st.info("✅ Preferences collected! Ready to generate your plan?")
+            if st.button("🥗 Generate My 7-Day Plan",
+                         type="primary",
+                         key="generate_plan_btn"):
+                st.session_state.plan_generated = True
+                st.session_state.plan_ready     = True
+                st.rerun()
+
+    # ── STEP 2: Generate + Parse Plan ───────────────────
+    elif st.session_state.plan_generated and not st.session_state.weekly_plan:
+        p          = st.session_state.get("profile", {})
+        risk_level = st.session_state.get('risk_level', 'Medium Risk')
+        risk_prob  = st.session_state.get('risk_prob', 0.5)
+
+        # extract preferences from chat
+        chat_summary = "\n".join([
+            f"{m['role']}: {m['content']}"
+            for m in st.session_state.diet_chat
+        ])
+
+        with st.spinner("🧠 Creating your personalized plan..."):
+
+            # Step 2a: extract preferences
+            prefs_raw = call_groq(
+                system="""Extract meal preferences from this conversation.
+Return JSON only:
+{
+  "meals_per_day": 4,
+  "wake_time": "7am",
+  "sleep_time": "10pm",
+  "favourite_foods": ["idli", "dal"],
+  "avoid_foods": ["maida", "fried"],
+  "cooking_time": "30 minutes",
+  "weekly_goal": "lower blood sugar",
+  "meal_names": ["Breakfast", "Lunch", "Evening Snack", "Dinner"]
+}""",
+                user=f"Extract from:\n{chat_summary}",
+                max_tokens=4000 
             )
 
+            try:
+                import json as json_lib
+                prefs_clean = prefs_raw.strip()
+                if "```json" in prefs_clean:
+                    prefs_clean = prefs_clean.split("```json")[1].split("```")[0]
+                elif "```" in prefs_clean:
+                    prefs_clean = prefs_clean.split("```")[1]
+                    if prefs_clean.startswith("json"):
+                        prefs_clean = prefs_clean[4:]
+                start = prefs_clean.find("{")
+                end   = prefs_clean.rfind("}") + 1
+                if start != -1 and end > start:
+                    prefs_clean = prefs_clean[start:end]
+                prefs = json_lib.loads(prefs_clean)
+            except:
+                prefs = {
+                    "meals_per_day": 4,
+                    "meal_names": ["Breakfast", "Lunch",
+                                   "Evening Snack", "Dinner"],
+                    "favourite_foods": [],
+                    "avoid_foods": []
+                }
+
+            st.session_state.diet_preferences = prefs
+            meal_names = prefs.get("meal_names",
+                                    ["Breakfast", "Lunch",
+                                     "Evening Snack", "Dinner"])
+
+            # Step 2b: generate structured plan
+            days = ["Monday","Tuesday","Wednesday",
+                    "Thursday","Friday","Saturday","Sunday"]
+
+            plan_prompt = f"""Create a 7-day diabetes meal plan.
+
+Patient:
+- Diet: {p.get('diet_pref', 'Vegetarian')}
+- Cuisine: {p.get('cuisine', 'Indian')}
+- Risk: {risk_level} ({risk_prob*100:.0f}%)
+- BMI: {p.get('bmi', 'Unknown')}
+- Allergies: {', '.join(p.get('allergies', ['None']))}
+- Favourite foods: {', '.join(prefs.get('favourite_foods', []))}
+- Avoid: {', '.join(prefs.get('avoid_foods', []))}
+- Meals per day: {prefs.get('meals_per_day', 4)}
+- Meal times: {', '.join(meal_names)}
+- Goal: {prefs.get('weekly_goal', 'manage blood sugar')}
+
+Return ONLY valid JSON — no extra text:
+{{
+  "days": [
+    {{
+      "day": 1,
+      "day_name": "Monday",
+      "meals": [
+        {{
+          "meal_type": "Breakfast",
+          "time": "8:00 AM",
+          "items": [
+            {{"name": "Idli", "quantity": "2 pieces",
+              "carbs": 20, "calories": 100}},
+            {{"name": "Sambar", "quantity": "1 bowl",
+              "carbs": 10, "calories": 60}}
+          ],
+          "total_carbs": 30,
+          "total_calories": 160,
+          "notes": "Low GI breakfast"
+        }}
+      ]
+    }}
+  ]
+}}
+
+Include all 7 days with {prefs.get('meals_per_day', 4)} 
+meals each. Vary foods daily. Focus on low GI foods."""
+
+            plan_raw = call_groq(
+                system="You are a diabetes nutritionist. Return only valid JSON.",
+                user=plan_prompt,
+                max_tokens=4000  # ← add this
+            )
+
+            # parse plan JSON
+            try:
+                plan_clean = plan_raw.strip()
+
+                # remove markdown code blocks
+                if "```json" in plan_clean:
+                    plan_clean = plan_clean.split("```json")[1].split("```")[0]
+                elif "```" in plan_clean:
+                    plan_clean = plan_clean.split("```")[1]
+                    if plan_clean.startswith("json"):
+                        plan_clean = plan_clean[4:]
+
+                # find JSON object in response
+                start = plan_clean.find("{")
+                end   = plan_clean.rfind("}") + 1
+                if start != -1 and end > start:
+                    plan_clean = plan_clean[start:end]
+
+                plan_data = json_lib.loads(plan_clean)
+                days_plan = plan_data.get("days", [])
+
+            except Exception as e:
+                st.error(f"Parse error: {e}")
+                st.code(plan_raw[:500])  # show what LLM returned for debugging
+                days_plan = []
+
+            # add tracking fields to each meal
+            for day in days_plan:
+                for meal in day.get("meals", []):
+                    meal["status"] = "pending"
+                    meal["actual_items"] = []
+                    meal["modified_notes"] = ""
+
+            st.session_state.weekly_plan = days_plan
+
+        if days_plan:
+            st.success("✅ Your 7-day plan is ready!")
+            st.rerun()
+        else:
+            st.error("Failed to generate plan. Please try again.")
+            st.session_state.plan_generated = False
+
+    # ── STEP 3: Weekly Tracker ───────────────────────────
+    elif st.session_state.weekly_plan:
+        plan = st.session_state.weekly_plan
+
+        # header + reset button
+        col1, col2, col3 = st.columns([3, 1, 1])
+        with col1:
+            st.markdown("### 📅 Your 7-Day Meal Tracker")
+        with col2:
+            if st.button("🔄 New Plan", key="new_plan"):
+                st.session_state.diet_chat        = []
+                st.session_state.diet_preferences = {}
+                st.session_state.weekly_plan      = []
+                st.session_state.plan_generated   = False
+                st.session_state.plan_ready       = False
+                st.rerun()
+        with col3:
+            # calculate overall adherence for download
+            all_meals   = [m for d in plan for m in d.get("meals", [])]
+            followed    = [m for m in all_meals if m["status"] == "followed"]
+            modified    = [m for m in all_meals if m["status"] == "modified"]
+            skipped     = [m for m in all_meals if m["status"] == "skipped"]
+            pending     = [m for m in all_meals if m["status"] == "pending"]
+            total_done  = len(followed) + len(modified)
+            total_meals = len(all_meals)
+            adherence   = (total_done / total_meals * 100) if total_meals > 0 else 0
+
+        # overall adherence bar
+        st.progress(
+            adherence/100,
+            text=f"Overall adherence: {adherence:.0f}% "
+                 f"({total_done}/{total_meals} meals) | "
+                 f"✅ {len(followed)} followed | "
+                 f"✏️ {len(modified)} modified | "
+                 f"❌ {len(skipped)} skipped"
+        )
+
+        st.divider()
+
+        # show each day
+        for day_idx, day in enumerate(plan):
+            day_meals   = day.get("meals", [])
+            day_followed = sum(1 for m in day_meals
+                               if m["status"] in ["followed","modified"])
+            day_total    = len(day_meals)
+            day_pct      = (day_followed/day_total*100) if day_total > 0 else 0
+
+            # day color based on adherence
+            if day_pct == 100:   day_emoji = "🟢"
+            elif day_pct >= 50:  day_emoji = "🟡"
+            elif day_pct > 0:    day_emoji = "🟠"
+            else:                day_emoji = "⚪"
+
+            with st.expander(
+                f"{day_emoji} Day {day['day']} — {day['day_name']} "
+                f"({day_followed}/{day_total} meals done | {day_pct:.0f}%)",
+                expanded=day_idx == 0
+            ):
+                for meal_idx, meal in enumerate(day_meals):
+                    st.markdown(f"#### 🍽️ {meal['meal_type']} — {meal.get('time','')}")
+
+                    # show planned items
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.markdown("**Planned:**")
+                        for item in meal.get("items", []):
+                            st.write(
+                                f"• {item['name']} ({item['quantity']}) — "
+                                f"{item.get('carbs',0)}g carbs, "
+                                f"{item.get('calories',0)} cal"
+                            )
+                        st.caption(
+                            f"Total: {meal.get('total_carbs',0)}g carbs | "
+                            f"{meal.get('total_calories',0)} cal"
+                        )
+                        if meal.get("notes"):
+                            st.caption(f"💡 {meal['notes']}")
+
+                    with col2:
+                        status = meal["status"]
+                        if status == "followed":
+                            st.success("✅ Followed")
+                        elif status == "modified":
+                            st.warning("✏️ Modified")
+                        elif status == "skipped":
+                            st.error("❌ Skipped")
+                        else:
+                            st.info("⏳ Pending")
+
+                    # action buttons
+                    key_base = f"d{day_idx}_m{meal_idx}"
+                    b1, b2, b3, b4 = st.columns(4)
+
+                    with b1:
+                        if st.button("✅ Followed",
+                                     key=f"follow_{key_base}",
+                                     type="primary" if status == "followed"
+                                     else "secondary"):
+                            plan[day_idx]["meals"][meal_idx]["status"] = "followed"
+                            plan[day_idx]["meals"][meal_idx]["actual_items"] = []
+                            plan[day_idx]["meals"][meal_idx]["modified_notes"] = ""
+                            st.session_state.weekly_plan = plan
+                            st.rerun()
+
+                    with b2:
+                        if st.button("✏️ Modified",
+                                     key=f"modify_{key_base}"):
+                            plan[day_idx]["meals"][meal_idx]["status"] = "modified"
+                            st.session_state.weekly_plan = plan
+                            st.rerun()
+
+                    with b3:
+                        if st.button("❌ Skipped",
+                                     key=f"skip_{key_base}"):
+                            plan[day_idx]["meals"][meal_idx]["status"] = "skipped"
+                            st.session_state.weekly_plan = plan
+                            st.rerun()
+
+                    with b4:
+                        if st.button("↩️ Reset",
+                                     key=f"reset_{key_base}"):
+                            plan[day_idx]["meals"][meal_idx]["status"] = "pending"
+                            plan[day_idx]["meals"][meal_idx]["modified_notes"] = ""
+                            st.session_state.weekly_plan = plan
+                            st.rerun()
+
+                    # modified notes input
+                    if meal["status"] == "modified":
+                        mod_note = st.text_input(
+                            "What did you have instead?",
+                            value=meal.get("modified_notes", ""),
+                            key=f"modnote_{key_base}",
+                            placeholder="e.g. Had upma instead of idli..."
+                        )
+                        if mod_note != meal.get("modified_notes", ""):
+                            plan[day_idx]["meals"][meal_idx]["modified_notes"] = mod_note
+                            st.session_state.weekly_plan = plan
+
+                    st.divider()
+
+        # ── Adherence Chart ──────────────────────────────
+        st.subheader("📊 Weekly Adherence Chart")
+
+        day_names  = [d['day_name'][:3] for d in plan]
+        day_adh    = []
+        for day in plan:
+            meals   = day.get("meals", [])
+            done    = sum(1 for m in meals
+                         if m["status"] in ["followed","modified"])
+            total   = len(meals)
+            day_adh.append((done/total*100) if total > 0 else 0)
+
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=day_names,
+            y=day_adh,
+            marker_color=[
+                '#22c55e' if a == 100 else
+                '#f59e0b' if a >= 50 else
+                '#ef4444' if a > 0 else
+                '#64748b'
+                for a in day_adh
+            ],
+            name='Adherence %'
+        ))
+        fig.add_hline(y=80, line_dash="dash",
+                      line_color="white",
+                      annotation_text="80% target")
+        fig.update_layout(
+            title="Daily Meal Adherence",
+            yaxis=dict(range=[0,100], title="Adherence %"),
+            xaxis_title="Day",
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='white'),
+            height=300
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # ── Best / Worst Day ─────────────────────────────
+        if any(a > 0 for a in day_adh):
+            best_idx  = day_adh.index(max(day_adh))
+            worst_idx = day_adh.index(min(day_adh))
+            col1, col2, col3 = st.columns(3)
+            col1.metric("🏆 Best Day",
+                        plan[best_idx]['day_name'],
+                        f"{day_adh[best_idx]:.0f}%")
+            col2.metric("📉 Needs Work",
+                        plan[worst_idx]['day_name'],
+                        f"{day_adh[worst_idx]:.0f}%")
+            col3.metric("📊 Week Average",
+                        f"{sum(day_adh)/len(day_adh):.0f}%")
+
+        # ── Download Plan ────────────────────────────────
+        st.divider()
+        plan_text  = f"7-Day Meal Plan\n{'='*40}\n\n"
+        for day in plan:
+            plan_text += f"\n{day['day_name']}\n{'-'*20}\n"
+            for meal in day.get("meals", []):
+                plan_text += f"\n{meal['meal_type']} ({meal.get('time','')})\n"
+                for item in meal.get("items", []):
+                    plan_text += (f"  • {item['name']} "
+                                  f"({item['quantity']})\n")
+                plan_text += (f"  Total: {meal.get('total_carbs',0)}g carbs | "
+                              f"{meal.get('total_calories',0)} cal\n")
+                if meal["status"] != "pending":
+                    plan_text += f"  Status: {meal['status']}\n"
+                if meal.get("modified_notes"):
+                    plan_text += f"  Modified: {meal['modified_notes']}\n"
+
+        st.download_button(
+            "⬇️ Download Plan + Tracker",
+            data=plan_text,
+            file_name="meal_plan_tracker.txt",
+            mime="text/plain"
+        )
 # ════════════════════════════════════════════════════════
 # TAB 4 — HEALTH TRACKER
 # ════════════════════════════════════════════════════════
