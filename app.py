@@ -151,6 +151,64 @@ Example for Actrapid 20U morning 20U noon 20U night:
     except:
         return None
 
+
+def detect_intent(message):
+    import json as json_lib
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {
+                "role": "system",
+                "content": """You are an intent detector for a health tracking app.
+Analyze the message and extract health data if present.
+Return ONLY valid JSON — no extra text.
+
+For blood sugar readings:
+{"type": "blood_sugar", "value": 145, "timing": "after lunch", "found": true}
+
+For medication taken:
+{"type": "medication", "name": "Actrapid", "timing": "morning", "found": true}
+
+For exercise:
+{"type": "exercise", "exercise_type": "walking", "duration": 30, "found": true}
+
+If no health data found:
+{"type": "none", "found": false}
+
+Only return found=true if you are confident.
+Examples:
+"my sugar is 145" → blood_sugar, value=145
+"took my metformin" → medication, name=metformin
+"walked for 30 mins" → exercise, duration=30
+"what should I eat" → none"""
+            },
+            {
+                "role": "user",
+                "content": message
+            }
+        ],
+        max_tokens=100
+    )
+
+    raw = response.choices[0].message.content
+    try:
+        clean = raw.strip()
+        if "```json" in clean:
+            clean = clean.split("```json")[1].split("```")[0]
+        elif "```" in clean:
+            clean = clean.split("```")[1]
+            if clean.startswith("json"):
+                clean = clean[4:]
+        start = clean.find("{")
+        end   = clean.rfind("}") + 1
+        if start != -1 and end > start:
+            clean = clean[start:end]
+        return json_lib.loads(clean)
+    except:
+        return {"type": "none", "found": False}
+
+
 def generate_health_report(profile, risk_data, bs_log, med_log, exercise_log, food_log):
 
     from reportlab.lib.pagesizes import letter
@@ -632,22 +690,102 @@ Be empathetic, clear, and practical.
             
 
     # Input
-    if question := st.chat_input("Ask about diabetes..."): #walrus operator — same thing in one line:
+    if question := st.chat_input("Ask about diabetes..."):
         with st.chat_message("user"):
             st.write(question)
         st.session_state.health_messages.append({
             "role": "user", "content": question
         })
-
+    
+        # detect intent silently
+        intent = detect_intent(question)
+    
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                answer = call_groq(system, question, history=st.session_state.health_messages)
+                answer = call_groq(system, question,
+                                   history=st.session_state.health_messages)
             st.write(answer)
-
+    
+            # auto update tracker based on intent
+            if intent.get("found"):
+            
+                # ── Blood Sugar ──────────────────────────────
+                if intent["type"] == "blood_sugar":
+                    value  = intent.get("value", 0)
+                    timing = intent.get("timing", "")
+                    if value > 0:
+                        if "blood_sugar_log" not in st.session_state:
+                            st.session_state.blood_sugar_log = []
+                        st.session_state.blood_sugar_log.append({
+                            "date":  str(date.today()),
+                            "time":  timing if timing else "Logged from chat",
+                            "value": value,
+                            "notes": "Auto-logged from chat"
+                        })
+                        st.success(
+                            f"✅ Auto-logged blood sugar: "
+                            f"**{value} mg/dL** ({timing})"
+                        )
+    
+                # ── Medication ───────────────────────────────
+                elif intent["type"] == "medication":
+                    med_name   = intent.get("name", "").lower()
+                    med_timing = intent.get("timing", "").lower()
+                    today_key  = str(date.today())
+    
+                    if "med_log" not in st.session_state:
+                        st.session_state.med_log = {}
+                    if today_key not in st.session_state.med_log:
+                        st.session_state.med_log[today_key] = {}
+    
+                    # find matching medication
+                    matched = False
+                    for med in st.session_state.get("medications", []):
+                        if med_name in med["name"].lower() or \
+                           med["name"].lower() in med_name:
+                            # check timing match
+                            med_freq = med.get("frequency", "").lower()
+                            if not med_timing or \
+                               med_timing in med_freq or \
+                               med_freq in med_timing:
+                                log_key = f"{med['name']}_{med.get('frequency','')}"
+                                st.session_state.med_log[today_key][log_key] = True
+                                st.success(
+                                    f"✅ Auto-marked: **{med['name']}** "
+                                    f"({med.get('frequency','')}) as taken!"
+                                )
+                                matched = True
+                                break
+                            
+                    if not matched and med_name:
+                        # add to log with the name from chat
+                        st.session_state.med_log[today_key][med_name] = True
+                        st.success(f"✅ Marked **{med_name}** as taken!")
+    
+                # ── Exercise ─────────────────────────────────
+                elif intent["type"] == "exercise":
+                    ex_type  = intent.get("exercise_type", "Exercise")
+                    duration = intent.get("duration", 30)
+                    if "exercise_log" not in st.session_state:
+                        st.session_state.exercise_log = []
+                    st.session_state.exercise_log.append({
+                        "date":       str(date.today()),
+                        "type":       ex_type.title(),
+                        "duration":   duration,
+                        "intensity":  "Moderate",
+                        "calories":   int(duration * 5),
+                        "bs_before":  0,
+                        "bs_after":   0,
+                        "notes":      "Auto-logged from chat"
+                    })
+                    st.success(
+                        f"✅ Auto-logged: **{duration} min {ex_type}** "
+                        f"to exercise tracker!"
+                    )
+    
         st.session_state.health_messages.append({
             "role": "assistant", "content": answer
         })
-
 # ════════════════════════════════════════════════════════
 # TAB 3 — DIET PLAN
 # ════════════════════════════════════════════════════════
@@ -1353,7 +1491,7 @@ with tab4:
                         if med.get("evening"): slots.append(f"🌆 Evening: {med['evening']}")
                         if med.get("night"):   slots.append(f"🌙 Night: {med['night']}")
                         slots_str = " | ".join(slots) if slots else "Once daily"
-                    
+
                         with st.expander(
                             f"💊 {med.get('name', 'Unknown')} — "
                             f"{med.get('dose', '')} — "
@@ -1365,7 +1503,7 @@ with tab4:
                             c2.write(f"**Dose:** {med.get('dose', '')}")
                             c3.write(f"**Route:** {med.get('route', '')}")
                             st.write(f"**Duration:** {med.get('duration', '')}")
-                    
+
                             # show time slots
                             st.markdown("**Schedule:**")
                             if slots:
@@ -1373,7 +1511,7 @@ with tab4:
                                     st.write(slot)
                             else:
                                 st.write("Once daily")
-                    
+
                             if med.get('instructions'):
                                 st.warning(f"📝 {med.get('instructions', '')}")
                     st.divider()
