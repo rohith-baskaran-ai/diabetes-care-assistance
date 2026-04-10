@@ -70,6 +70,87 @@ def call_groq(system, user, history=None, max_tokens=1000):
     )
     return response.choices[0].message.content
 
+def analyze_prescription(image_bytes, image_type="jpeg"):
+    import base64
+    import json as json_lib
+
+    base64_image = base64.b64encode(image_bytes).decode("utf-8")
+
+    response = client.chat.completions.create(
+        model="meta-llama/llama-4-scout-17b-16e-instruct",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": """You are a medical prescription reader.
+Extract all medicines from this prescription image.
+Return ONLY valid JSON — no extra text:
+{
+  "medicines": [
+    {
+      "name": "medicine name",
+      "dose": "total dose",
+      "morning": "dose in morning or empty string",
+      "noon": "dose at noon or empty string",
+      "evening": "dose in evening or empty string",
+      "night": "dose at night or empty string",
+      "duration": "how long e.g. 30 days",
+      "route": "oral/SC/IV/VG etc",
+      "instructions": "special instructions"
+    }
+  ],
+  "doctor_name": "doctor name if visible",
+  "patient_name": "patient name if visible",
+  "date": "date if visible"
+}
+
+For each medicine extract exact dose per time slot.
+If a slot is empty or has - put empty string.
+Example for Actrapid 20U morning 20U noon 20U night:
+{
+  "name": "Actrapid",
+  "dose": "20 Units",
+  "morning": "20 Units",
+  "noon": "20 Units",
+  "evening": "",
+  "night": "20 Units",
+  "duration": "30 days",
+  "route": "SC",
+  "instructions": ""
+}"""
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/{image_type};base64,{base64_image}"
+                        }
+                    }
+                ]
+            }
+        ],
+        max_tokens=1000
+    )
+
+    raw = response.choices[0].message.content
+
+    try:
+        clean = raw.strip()
+        if "```json" in clean:
+            clean = clean.split("```json")[1].split("```")[0]
+        elif "```" in clean:
+            clean = clean.split("```")[1]
+            if clean.startswith("json"):
+                clean = clean[4:]
+        start = clean.find("{")
+        end   = clean.rfind("}") + 1
+        if start != -1 and end > start:
+            clean = clean[start:end]
+        return json_lib.loads(clean)
+    except:
+        return None
+
 def generate_health_report(profile, risk_data, bs_log, med_log, exercise_log, food_log):
 
     from reportlab.lib.pagesizes import letter
@@ -1201,6 +1282,11 @@ with tab4:
     # MEDICATION TRACKER — upgraded
     # ════════════════════════════════════════════════════
     with tracker_tab2:
+        if st.button("Clear prescription cache", key="clear_cache"):
+            if "prescription_result" in st.session_state:
+                del st.session_state.prescription_result
+            st.rerun()
+
         st.subheader("💊 Medication Tracker")
         st.caption("Track your medications and daily adherence")
 
@@ -1210,6 +1296,146 @@ with tab4:
             st.session_state.med_log = {}
 
         # ── Add Medication ───────────────────────────────
+        # ── Upload Prescription ──────────────────────────────
+        st.subheader("📋 Upload Prescription")
+        st.caption("Upload a photo or PDF of your prescription — AI will extract medicines automatically")
+
+        uploaded_prescription = st.file_uploader(
+            "Upload prescription image",
+            type=["jpg", "jpeg", "png"],
+            key="prescription_upload"
+        )
+
+        if uploaded_prescription:
+            col1, col2 = st.columns([1, 1])
+
+            with col1:
+                st.image(uploaded_prescription, caption="Uploaded Prescription",
+                         use_column_width=True)
+
+            with col2:
+                if st.button("🔍 Analyze Prescription", type="primary",
+                             key="analyze_btn"):
+                    with st.spinner("🤖 Reading prescription..."):
+                        image_bytes = uploaded_prescription.read()
+                        image_type  = uploaded_prescription.type.split("/")[1]
+                        result      = analyze_prescription(image_bytes, image_type)
+
+                    if result:
+                        st.session_state.prescription_result = result
+                        st.success("✅ Prescription analyzed!")
+                        # debug — show raw result
+                        st.json(result)  # ← add this temporarily
+                    else:
+                        st.error("Failed to read prescription. Try a clearer image.")
+
+            # show extracted medicines
+            if "prescription_result" in st.session_state and st.session_state.prescription_result:
+                result = st.session_state.prescription_result
+                st.divider()
+                st.subheader("💊 Extracted Medicines")
+
+                # show prescription info
+                info_col1, info_col2, info_col3 = st.columns(3)
+                info_col1.info(f"👨‍⚕️ Dr: {result.get('doctor_name', 'N/A')}")
+                info_col2.info(f"👤 Patient: {result.get('patient_name', 'N/A')}")
+                info_col3.info(f"📅 Date: {result.get('date', 'N/A')}")
+
+                medicines = result.get("medicines", [])
+
+                if medicines:
+                    # show each extracted medicine
+                    for i, med in enumerate(medicines):
+                        # build time slots summary
+                        slots = []
+                        if med.get("morning"): slots.append(f"🌅 Morning: {med['morning']}")
+                        if med.get("noon"):    slots.append(f"☀️ Noon: {med['noon']}")
+                        if med.get("evening"): slots.append(f"🌆 Evening: {med['evening']}")
+                        if med.get("night"):   slots.append(f"🌙 Night: {med['night']}")
+                        slots_str = " | ".join(slots) if slots else "Once daily"
+                    
+                        with st.expander(
+                            f"💊 {med.get('name', 'Unknown')} — "
+                            f"{med.get('dose', '')} — "
+                            f"{slots_str}",
+                            expanded=True
+                        ):
+                            c1, c2, c3 = st.columns(3)
+                            c1.write(f"**Name:** {med.get('name', '')}")
+                            c2.write(f"**Dose:** {med.get('dose', '')}")
+                            c3.write(f"**Route:** {med.get('route', '')}")
+                            st.write(f"**Duration:** {med.get('duration', '')}")
+                    
+                            # show time slots
+                            st.markdown("**Schedule:**")
+                            if slots:
+                                for slot in slots:
+                                    st.write(slot)
+                            else:
+                                st.write("Once daily")
+                    
+                            if med.get('instructions'):
+                                st.warning(f"📝 {med.get('instructions', '')}")
+                    st.divider()
+
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("✅ Add All to Medication Tracker",
+                                     type="primary",
+                                     key="add_all_meds"):
+                            added = 0
+                            for med in medicines:
+                                name         = med.get("name", "Unknown")
+                                duration     = med.get("duration", "")
+                                route        = med.get("route", "")
+                                instructions = med.get("instructions", "")
+                                notes        = f"{route} | {instructions}".strip(" |")
+
+                                # build time slots
+                                slots = {
+                                    "Morning": med.get("morning", ""),
+                                    "Noon":    med.get("noon", ""),
+                                    "Evening": med.get("evening", ""),
+                                    "Night":   med.get("night", "")
+                                }
+
+                                # filter only non-empty slots
+                                active_slots = {k: v for k, v in slots.items() if v.strip()}
+
+                                if active_slots:
+                                    # add one entry per time slot
+                                    for time_slot, dose in active_slots.items():
+                                        st.session_state.medications.append({
+                                            "name":      name,
+                                            "dose":      dose,
+                                            "frequency": time_slot,  # Morning/Noon/Evening/Night
+                                            "times":     [time_slot],
+                                            "notes":     notes,
+                                            "duration":  duration
+                                        })
+                                        added += 1
+                                else:
+                                    # no slot info — add as once daily
+                                    st.session_state.medications.append({
+                                        "name":      name,
+                                        "dose":      med.get("dose", ""),
+                                        "frequency": "Once daily",
+                                        "times":     [],
+                                        "notes":     notes,
+                                        "duration":  duration
+                                    })
+                                    added += 1
+
+                            st.success(f"✅ Added {added} medication entries to tracker!")
+                            st.session_state.prescription_result = None
+                            st.rerun()
+
+                    with col2:
+                        if st.button("🗑️ Clear", key="clear_prescription"):
+                            st.session_state.prescription_result = None
+                            st.rerun()
+
+        st.divider()
         with st.expander("➕ Add New Medication", expanded=len(st.session_state.medications) == 0):
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -1261,7 +1487,16 @@ with tab4:
                 col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
 
                 with col1:
-                    st.write(f"💊 **{med['name']}** — {med['dose']}")
+                    # show time slot emoji
+                    freq = med.get("frequency", "")
+                    if freq == "Morning":   slot_emoji = "🌅"
+                    elif freq == "Noon":    slot_emoji = "☀️"
+                    elif freq == "Evening": slot_emoji = "🌆"
+                    elif freq == "Night":   slot_emoji = "🌙"
+                    else:                   slot_emoji = "💊"
+                    st.write(f"{slot_emoji} **{med['name']}** — {med['dose']}")
+                    if med.get("notes"):
+                        st.caption(f"📝 {med['notes']}")
                 with col2:
                     st.write(f"🕐 {med['frequency']}")
                 with col3:
@@ -1278,20 +1513,14 @@ with tab4:
                         st.session_state.medications.pop(i)
                         st.rerun()
 
-            # Adherence today
-            total = len(st.session_state.medications)
-            # only count non-rest days for adherence
-            active_days  = [d for d in all_days if not d["is_rest_day"]]
-            done_days    = [d for d in active_days
-                            if d["status"] in ["done", "modified"]]
-            adherence    = (len(done_days) / len(active_days) * 100) \
-                           if active_days else 0
-            adherence    = min(adherence, 100)  # cap at 100%
+            # Adherence today — medication specific
+            total        = len(st.session_state.medications)
+            adherence    = (taken_count / total * 100) if total > 0 else 0
+            adherence    = min(adherence, 100)
 
             st.progress(
-                min(adherence/100, 1.0),  # cap at 1.0
-                text=f"Weekly adherence: {adherence:.0f}% "
-                     f"({len(done_days)}/{len(active_days)} active sessions)"
+                min(adherence/100, 1.0),
+                text=f"Today's adherence: {taken_count}/{total} ({adherence:.0f}%)"
             )
 
             # ── Adherence Chart (last 7 days) ────────────
