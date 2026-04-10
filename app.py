@@ -1280,9 +1280,19 @@ with tab4:
 
             # Adherence today
             total = len(st.session_state.medications)
-            adherence = (taken_count / total * 100) if total > 0 else 0
-            st.progress(adherence/100,
-                        text=f"Today's adherence: {taken_count}/{total} ({adherence:.0f}%)")
+            # only count non-rest days for adherence
+            active_days  = [d for d in all_days if not d["is_rest_day"]]
+            done_days    = [d for d in active_days
+                            if d["status"] in ["done", "modified"]]
+            adherence    = (len(done_days) / len(active_days) * 100) \
+                           if active_days else 0
+            adherence    = min(adherence, 100)  # cap at 100%
+
+            st.progress(
+                min(adherence/100, 1.0),  # cap at 1.0
+                text=f"Weekly adherence: {adherence:.0f}% "
+                     f"({len(done_days)}/{len(active_days)} active sessions)"
+            )
 
             # ── Adherence Chart (last 7 days) ────────────
             if len(st.session_state.med_log) > 1:
@@ -1328,143 +1338,563 @@ with tab4:
 
         st.warning("⚠️ Always follow your doctor's prescription.")
 
-    # ════════════════════════════════════════════════════
-    # EXERCISE TRACKER — upgraded
-    # ════════════════════════════════════════════════════
-    with tracker_tab3:
-        st.subheader("🏃 Exercise Tracker")
-        st.caption("Log your daily exercise and track your progress")
+    # ════════════════════════════════════════════════════════
+# EXERCISE TRACKER — upgraded with plan + adherence
+# ════════════════════════════════════════════════════════
+with tracker_tab3:
+    p = st.session_state.get("profile", {})
 
-        if "exercise_log" not in st.session_state:
-            st.session_state.exercise_log = []
+    if p:
+        st.success(
+            f"👤 {p.get('name')} | {p.get('gender')} | "
+            f"Age: {p.get('age')} | BMI: {p.get('bmi')} | "
+            f"{p.get('fitness_level')} | {p.get('diabetes_type')}"
+        )
 
-        # ── Log Exercise ─────────────────────────────────
-        st.subheader("➕ Log Today's Exercise")
+    # initialize session state
+    if "exercise_chat"      not in st.session_state:
+        st.session_state.exercise_chat      = []
+    if "exercise_plan"      not in st.session_state:
+        st.session_state.exercise_plan      = []
+    if "ex_plan_generated"  not in st.session_state:
+        st.session_state.ex_plan_generated  = False
+    if "ex_plan_ready"      not in st.session_state:
+        st.session_state.ex_plan_ready      = False
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            ex_date = st.date_input("Date",
-                                     value=date.today(),
-                                     key="ex_date")
-            ex_type = st.selectbox("Exercise Type", [
-                "Walking", "Jogging", "Running", "Cycling",
-                "Swimming", "Yoga", "Strength Training",
-                "Stretching", "Dancing", "Other"
-            ])
-        with col2:
-            ex_duration = st.number_input("Duration (minutes)",
-                                           min_value=5, max_value=300,
-                                           value=30, key="ex_duration")
-            ex_intensity = st.selectbox("Intensity",
-                                         ["Light", "Moderate", "Intense"])
-        with col3:
-            ex_calories = st.number_input("Calories Burned (approx)",
-                                           min_value=0, max_value=2000,
-                                           value=150, key="ex_calories")
-            ex_bs_before = st.number_input("Blood Sugar Before (optional)",
-                                            min_value=0, max_value=600,
-                                            value=0, key="ex_bs_before",
-                                            help="0 = not measured")
-            ex_bs_after  = st.number_input("Blood Sugar After (optional)",
-                                            min_value=0, max_value=600,
-                                            value=0, key="ex_bs_after",
-                                            help="0 = not measured")
+    # ── STEP 1: Setup Chat ───────────────────────────────
+    if not st.session_state.ex_plan_generated:
 
-        ex_notes = st.text_input("Notes", placeholder="How did it feel?",
-                                  key="ex_notes")
+        st.markdown("### 💬 Step 1 — Tell me about your fitness")
+        st.caption("Quick chat to set up your personalized exercise plan")
 
-        if st.button("➕ Log Exercise", type="primary"):
-            st.session_state.exercise_log.append({
-                "date":       str(ex_date),
-                "type":       ex_type,
-                "duration":   ex_duration,
-                "intensity":  ex_intensity,
-                "calories":   ex_calories,
-                "bs_before":  ex_bs_before,
-                "bs_after":   ex_bs_after,
-                "notes":      ex_notes
+        risk_level = st.session_state.get('risk_level', 'Medium Risk')
+        risk_prob  = st.session_state.get('risk_prob', 0.5)
+
+        ex_setup_system = f"""You are a certified diabetes fitness coach
+helping set up a personalized exercise plan.
+
+Patient Profile:
+- Name: {p.get('name', 'Patient')}
+- Age: {p.get('age', 'Unknown')}
+- Gender: {p.get('gender', 'Unknown')}
+- Diabetes Status: {p.get('diabetes_type', 'Unknown')}
+- BMI: {p.get('bmi', 'Unknown')}
+- Risk Level: {risk_level} ({risk_prob*100:.0f}%)
+- Current Fitness: {p.get('fitness_level', 'Sedentary')}
+- Known Conditions: {', '.join(p.get('conditions', ['None']))}
+
+Your job:
+Ask these 4 questions ONE AT A TIME:
+Q1: What type of exercise do you enjoy or prefer?
+    (walking, yoga, cycling, swimming, gym, home workout)
+Q2: How many days per week can you exercise?
+    (suggest 5 days for diabetics — rest 2 days)
+Q3: How much time can you spend per session?
+    (suggest 30-45 min)
+Q4: Any physical limitations or injuries?
+    (joint pain, back pain, heart condition, etc.)
+
+After all answers:
+- Summarize their preferences
+- Give 2-3 tips based on their profile + gender
+- End with: "Ready to generate your plan? Type yes!"
+
+Keep responses friendly and concise.
+Consider their gender and age for recommendations."""
+
+        # welcome message
+        if not st.session_state.exercise_chat:
+            with st.chat_message("assistant"):
+                welcome = f"""Hi {p.get('name', 'there')}! 💪 
+Let's create your personalized 7-day exercise plan.
+
+Based on your profile — **{p.get('gender', '')}, 
+Age {p.get('age', '')}, BMI {p.get('bmi', '')}** — 
+I'll design a safe and effective plan for diabetes management.
+
+Just 4 quick questions to get started!
+
+**What type of exercise do you enjoy or prefer?**
+Some options: walking, yoga, cycling, swimming, 
+home workouts, gym. What suits you best?"""
+                st.write(welcome)
+            st.session_state.exercise_chat.append({
+                "role": "assistant", "content": welcome
             })
-            st.success(f"✅ Logged: {ex_duration} min {ex_type}")
-            st.rerun()
 
-        # ── Stats + Chart ────────────────────────────────
-        if st.session_state.exercise_log:
-            df_ex = pd.DataFrame(st.session_state.exercise_log)
+        # show chat history
+        for msg in st.session_state.exercise_chat[1:]:
+            with st.chat_message(msg["role"]):
+                st.write(msg["content"])
 
-            # Summary stats
-            total_mins = df_ex['duration'].sum()
-            total_cals = df_ex['calories'].sum()
-            avg_mins   = df_ex['duration'].mean()
-            streak     = 0
-            dates_set  = set(df_ex['date'].tolist())
-            check_date = date.today()
-            while str(check_date) in dates_set:
-                streak    += 1
-                check_date = check_date.replace(day=check_date.day - 1)
+        # reset button
+        col1, col2 = st.columns([4, 1])
+        with col2:
+            if st.button("🔄 Start Over", key="ex_reset"):
+                st.session_state.exercise_chat     = []
+                st.session_state.exercise_plan     = []
+                st.session_state.ex_plan_generated = False
+                st.session_state.ex_plan_ready     = False
+                st.rerun()
 
-            e1, e2, e3, e4 = st.columns(4)
-            e1.metric("Total Minutes",   f"{total_mins}")
-            e2.metric("Calories Burned", f"{total_cals}")
-            e3.metric("Avg per Session", f"{avg_mins:.0f} min")
-            e4.metric("🔥 Streak",       f"{streak} days")
+        # chat input
+        if user_msg := st.chat_input("Type your answer...",
+                                      key="exercise_chat_input"):
+            with st.chat_message("user"):
+                st.write(user_msg)
+            st.session_state.exercise_chat.append({
+                "role": "user", "content": user_msg
+            })
 
-            st.divider()
-
-            # Weekly chart
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=df_ex['date'].tolist()[-7:],
-                y=df_ex['duration'].tolist()[-7:],
-                marker_color='#6366f1',
-                name='Duration (min)'
-            ))
-            fig.add_hline(y=30, line_dash="dash",
-                          line_color="green",
-                          annotation_text="Recommended 30 min")
-            fig.update_layout(
-                title="Exercise Log (Last 7 Sessions)",
-                xaxis_title="Date",
-                yaxis_title="Duration (minutes)",
-                plot_bgcolor='rgba(0,0,0,0)',
-                paper_bgcolor='rgba(0,0,0,0)',
-                font=dict(color='white'),
-                height=300
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-            # Blood sugar impact
-            bs_data = df_ex[(df_ex['bs_before'] > 0) & (df_ex['bs_after'] > 0)]
-            if len(bs_data) > 0:
-                st.subheader("📉 Exercise Impact on Blood Sugar")
-                for _, row in bs_data.iterrows():
-                    diff  = row['bs_after'] - row['bs_before']
-                    color = "green" if diff < 0 else "red"
-                    st.markdown(
-                        f"**{row['date']}** — {row['type']}: "
-                        f"{row['bs_before']} → {row['bs_after']} "
-                        f"(:{color}[{diff:+.0f} mg/dL])"
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking..."):
+                    response = call_groq(
+                        system=ex_setup_system,
+                        user=user_msg,
+                        history=st.session_state.exercise_chat[:-1]
                     )
+                st.write(response)
+            st.session_state.exercise_chat.append({
+                "role": "assistant", "content": response
+            })
 
-            # Log table
-            with st.expander("📋 Full Exercise History"):
-                st.dataframe(df_ex, use_container_width=True)
+            if any(word in user_msg.lower() for word in
+                   ["yes", "ready", "generate", "ok",
+                    "sure", "proceed", "go ahead"]):
+                st.session_state.ex_plan_ready = True
+                st.rerun()
 
-            col1, col2 = st.columns(2)
-            with col1:
-                ex_text = f"Exercise Log\n{'='*30}\n\n"
-                for _, row in df_ex.iterrows():
-                    ex_text += f"{row['date']} — {row['type']} — {row['duration']}min — {row['calories']} cal\n"
-                st.download_button("⬇️ Download Log",
-                                    data=ex_text,
-                                    file_name="exercise_log.txt",
-                                    mime="text/plain")
-            with col2:
-                if st.button("🗑️ Clear Exercise Log"):
-                    st.session_state.exercise_log = []
-                    st.rerun()
+        # generate button
+        if (len(st.session_state.exercise_chat) >= 6
+                or st.session_state.ex_plan_ready):
+            st.divider()
+            st.info("✅ Preferences collected! Ready to generate your plan?")
+            if st.button("🏃 Generate My 7-Day Exercise Plan",
+                         type="primary",
+                         key="generate_ex_plan_btn"):
+                st.session_state.ex_plan_generated = True
+                st.rerun()
+
+    # ── STEP 2: Generate Plan ────────────────────────────
+    elif st.session_state.ex_plan_generated \
+            and not st.session_state.exercise_plan:
+
+        p          = st.session_state.get("profile", {})
+        risk_level = st.session_state.get('risk_level', 'Medium Risk')
+
+        chat_summary = "\n".join([
+            f"{m['role']}: {m['content']}"
+            for m in st.session_state.exercise_chat
+        ])
+
+        with st.spinner("🧠 Creating your exercise plan..."):
+
+            # extract preferences
+            ex_prefs_raw = call_groq(
+                system="""Extract exercise preferences from conversation.
+Return JSON only — no extra text:
+{
+  "preferred_exercise": "walking",
+  "days_per_week": 5,
+  "session_duration": 30,
+  "limitations": "none",
+  "rest_days": ["Sunday", "Wednesday"]
+}""",
+                user=f"Extract from:\n{chat_summary}"
+            )
+
+            try:
+                import json as json_lib
+                prefs_clean = ex_prefs_raw.strip()
+                if "```json" in prefs_clean:
+                    prefs_clean = prefs_clean.split("```json")[1].split("```")[0]
+                elif "```" in prefs_clean:
+                    prefs_clean = prefs_clean.split("```")[1]
+                    if prefs_clean.startswith("json"):
+                        prefs_clean = prefs_clean[4:]
+                start = prefs_clean.find("{")
+                end   = prefs_clean.rfind("}") + 1
+                if start != -1 and end > start:
+                    prefs_clean = prefs_clean[start:end]
+                ex_prefs = json_lib.loads(prefs_clean)
+            except:
+                ex_prefs = {
+                    "preferred_exercise": "walking",
+                    "days_per_week":      5,
+                    "session_duration":   30,
+                    "limitations":        "none",
+                    "rest_days":          ["Sunday"]
+                }
+
+            # generate 7-day plan
+            ex_plan_prompt = f"""Create a 7-day exercise plan for a diabetes patient.
+
+Patient:
+- Name: {p.get('name')}
+- Gender: {p.get('gender')}
+- Age: {p.get('age')}
+- BMI: {p.get('bmi')}
+- Diabetes: {p.get('diabetes_type')}
+- Risk Level: {risk_level}
+- Fitness Level: {p.get('fitness_level')}
+- Conditions: {', '.join(p.get('conditions', ['None']))}
+- Preferred Exercise: {ex_prefs.get('preferred_exercise')}
+- Days per week: {ex_prefs.get('days_per_week')}
+- Session duration: {ex_prefs.get('session_duration')} minutes
+- Limitations: {ex_prefs.get('limitations')}
+- Rest days: {', '.join(ex_prefs.get('rest_days', ['Sunday']))}
+
+Return ONLY valid JSON:
+{{
+  "days": [
+    {{
+      "day": 1,
+      "day_name": "Monday",
+      "is_rest_day": false,
+      "exercise_type": "Brisk Walking",
+      "duration": 30,
+      "intensity": "Moderate",
+      "calories_est": 150,
+      "warm_up": "5 min slow walk",
+      "cool_down": "5 min stretching",
+      "bs_benefit": "Lowers blood sugar by 20-30 mg/dL",
+      "instructions": "Walk at a pace where you can talk but feel slightly breathless"
+    }},
+    {{
+      "day": 2,
+      "day_name": "Tuesday",
+      "is_rest_day": true,
+      "exercise_type": "Rest + Light Stretching",
+      "duration": 10,
+      "intensity": "Light",
+      "calories_est": 30,
+      "warm_up": "",
+      "cool_down": "",
+      "bs_benefit": "Recovery helps muscle glucose uptake",
+      "instructions": "Gentle full body stretching for 10 minutes"
+    }}
+  ]
+}}
+
+Important:
+- Consider gender ({p.get('gender')}) for intensity
+- Include proper rest days
+- Vary exercise types across the week
+- Keep it safe for diabetes patients
+- Be concise — max 2 sentences per field"""
+
+            ex_plan_raw = call_groq(
+                system="You are a diabetes fitness coach. Return only valid JSON.",
+                user=ex_plan_prompt,
+                max_tokens=4000
+            )
+
+            # parse plan
+            try:
+                plan_clean = ex_plan_raw.strip()
+                if "```json" in plan_clean:
+                    plan_clean = plan_clean.split("```json")[1].split("```")[0]
+                elif "```" in plan_clean:
+                    plan_clean = plan_clean.split("```")[1]
+                    if plan_clean.startswith("json"):
+                        plan_clean = plan_clean[4:]
+                start = plan_clean.find("{")
+                end   = plan_clean.rfind("}") + 1
+                if start != -1 and end > start:
+                    plan_clean = plan_clean[start:end]
+                plan_data = json_lib.loads(plan_clean)
+                ex_days   = plan_data.get("days", [])
+            except Exception as e:
+                st.error(f"Parse error: {e}")
+                ex_days = []
+
+            # add tracking fields
+            for day in ex_days:
+                day["status"]          = "pending"
+                day["actual_duration"] = 0
+                day["actual_exercise"] = ""
+                day["notes"]           = ""
+
+            st.session_state.exercise_plan = ex_days
+
+        if ex_days:
+            st.success("✅ Your 7-day exercise plan is ready!")
+            st.rerun()
         else:
-            st.info("No exercise logged yet. Log your first session above!")
+            st.error("Failed to generate plan. Please try again.")
+            st.session_state.ex_plan_generated = False
 
+    # ── STEP 3: Exercise Tracker ─────────────────────────
+    elif st.session_state.exercise_plan:
+        plan = st.session_state.exercise_plan
+
+        # header
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.markdown("### 📅 Your 7-Day Exercise Tracker")
+        with col2:
+            if st.button("🔄 New Plan", key="new_ex_plan"):
+                st.session_state.exercise_chat     = []
+                st.session_state.exercise_plan     = []
+                st.session_state.ex_plan_generated = False
+                st.session_state.ex_plan_ready     = False
+                st.rerun()
+
+        # overall stats
+        all_days     = plan
+        rest_days    = [d for d in all_days if d.get("is_rest_day", False)]
+        active_days  = [d for d in all_days if not d.get("is_rest_day", False)]
+        done_days    = [d for d in active_days if d["status"] in ["done", "modified"]]
+        skipped_days = [d for d in active_days if d["status"] == "skipped"]
+        adherence    = (len(done_days) / len(active_days) * 100) if active_days else 0
+        adherence    = min(adherence, 100.0)
+
+        # streak counter
+        streak     = 0
+        done_dates = set()
+        for i, day in enumerate(plan):
+            if day["status"] in ["done", "modified"]:
+                done_dates.add(i)
+        for i in range(len(plan)-1, -1, -1):
+            if i in done_dates:
+                streak += 1
+            else:
+                break
+
+        # metrics row
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("✅ Done",      len(done_days))
+        m2.metric("❌ Skipped",   len(skipped_days))
+        m3.metric("🛌 Rest Days", len(rest_days))
+        m4.metric("🔥 Streak",    f"{streak} days")
+        m5.metric("📊 Adherence", f"{adherence:.0f}%")
+
+        st.progress(
+            min(adherence/100, 1.0),
+            text=f"Weekly adherence: {adherence:.0f}% "
+                 f"({len(done_days)}/{len(active_days)} active sessions)"
+        )
+
+        st.divider()
+
+        # show each day
+        for day_idx, day in enumerate(plan):
+            is_rest = day.get("is_rest_day", False)
+            status  = day["status"]
+
+            if status == "done":       day_emoji = "🟢"
+            elif status == "modified": day_emoji = "🟡"
+            elif status == "skipped":  day_emoji = "🔴"
+            elif is_rest:              day_emoji = "🛌"
+            else:                      day_emoji = "⚪"
+
+            rest_label = " — Rest Day" if is_rest else ""
+
+            with st.expander(
+                f"{day_emoji} Day {day['day']} — "
+                f"{day['day_name']}{rest_label} | "
+                f"{day['exercise_type']} | "
+                f"{day['duration']} min | {status.title()}",
+                expanded=day_idx == 0
+            ):
+                col1, col2 = st.columns([3, 1])
+
+                with col1:
+                    if is_rest:
+                        st.info("🛌 Rest & Recovery Day")
+                    st.markdown(f"**Exercise:** {day['exercise_type']}")
+                    st.markdown(f"**Duration:** {day['duration']} minutes")
+                    st.markdown(f"**Intensity:** {day['intensity']}")
+                    st.markdown(f"**Est. Calories:** {day['calories_est']} cal")
+
+                    if day.get("warm_up"):
+                        st.caption(f"🔥 Warm up: {day['warm_up']}")
+                    if day.get("cool_down"):
+                        st.caption(f"❄️ Cool down: {day['cool_down']}")
+                    if day.get("instructions"):
+                        st.info(f"💡 {day['instructions']}")
+                    if day.get("bs_benefit"):
+                        st.success(f"🩸 {day['bs_benefit']}")
+
+                with col2:
+                    if status == "done":
+                        st.success("✅ Done!")
+                    elif status == "modified":
+                        st.warning("✏️ Modified")
+                    elif status == "skipped":
+                        st.error("❌ Skipped")
+                    else:
+                        st.info("⏳ Pending")
+
+                # action buttons
+                key_base = f"ex_d{day_idx}"
+                b1, b2, b3, b4 = st.columns(4)
+
+                with b1:
+                    if st.button("✅ Done",
+                                 key=f"exdone_{key_base}",
+                                 type="primary" if status == "done"
+                                 else "secondary"):
+                        plan[day_idx]["status"]          = "done"
+                        plan[day_idx]["actual_exercise"] = day["exercise_type"]
+                        plan[day_idx]["actual_duration"] = day["duration"]
+                        st.session_state.exercise_plan   = plan
+                        st.rerun()
+
+                with b2:
+                    if st.button("✏️ Modified",
+                                 key=f"exmod_{key_base}"):
+                        plan[day_idx]["status"]        = "modified"
+                        st.session_state.exercise_plan = plan
+                        st.rerun()
+
+                with b3:
+                    if st.button("❌ Skipped",
+                                 key=f"exskip_{key_base}"):
+                        plan[day_idx]["status"]        = "skipped"
+                        st.session_state.exercise_plan = plan
+                        st.rerun()
+
+                with b4:
+                    if st.button("↩️ Reset",
+                                 key=f"exreset_{key_base}"):
+                        plan[day_idx]["status"]          = "pending"
+                        plan[day_idx]["actual_exercise"] = ""
+                        plan[day_idx]["actual_duration"] = 0
+                        plan[day_idx]["notes"]           = ""
+                        st.session_state.exercise_plan   = plan
+                        st.rerun()
+
+                # modified input
+                if status == "modified":
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        actual_ex = st.text_input(
+                            "What exercise did you do?",
+                            value=day.get("actual_exercise", ""),
+                            key=f"actual_ex_{key_base}",
+                            placeholder="e.g. Yoga instead of walking"
+                        )
+                        if actual_ex != day.get("actual_exercise", ""):
+                            plan[day_idx]["actual_exercise"] = actual_ex
+                            st.session_state.exercise_plan   = plan
+                    with col2:
+                        actual_dur = st.number_input(
+                            "Duration (minutes)",
+                            min_value=0, max_value=300,
+                            value=day.get("actual_duration", 0),
+                            key=f"actual_dur_{key_base}"
+                        )
+                        if actual_dur != day.get("actual_duration", 0):
+                            plan[day_idx]["actual_duration"] = actual_dur
+                            st.session_state.exercise_plan   = plan
+
+                    ex_notes = st.text_input(
+                        "Notes",
+                        value=day.get("notes", ""),
+                        key=f"exnotes_{key_base}",
+                        placeholder="How did it go?"
+                    )
+                    if ex_notes != day.get("notes", ""):
+                        plan[day_idx]["notes"]         = ex_notes
+                        st.session_state.exercise_plan = plan
+
+        # ── Adherence Chart ──────────────────────────────
+        st.divider()
+        st.subheader("📊 Weekly Exercise Chart")
+
+        day_names   = [d['day_name'][:3] for d in plan]
+        durations   = []
+        colors_list = []
+
+        for day in plan:
+            if day["status"] == "done":
+                durations.append(day["duration"])
+                colors_list.append("#22c55e")
+            elif day["status"] == "modified":
+                durations.append(day.get("actual_duration", day["duration"]))
+                colors_list.append("#f59e0b")
+            elif day["status"] == "skipped":
+                durations.append(0)
+                colors_list.append("#ef4444")
+            elif day.get("is_rest_day"):
+                durations.append(day["duration"])
+                colors_list.append("#6366f1")
+            else:
+                durations.append(0)
+                colors_list.append("#64748b")
+
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=day_names,
+            y=durations,
+            marker_color=colors_list,
+            name='Duration (min)'
+        ))
+        fig.add_hline(
+            y=30, line_dash="dash",
+            line_color="white",
+            annotation_text="30 min goal"
+        )
+        fig.update_layout(
+            title="Daily Exercise Duration",
+            yaxis_title="Minutes",
+            xaxis_title="Day",
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='white'),
+            height=300
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.caption(
+            "🟢 Done | 🟡 Modified | 🔴 Skipped | "
+            "🟣 Rest Day | ⚫ Pending"
+        )
+
+        # summary stats
+        total_mins = sum(
+            d["duration"] if d["status"] == "done"
+            else d.get("actual_duration", 0) if d["status"] == "modified"
+            else 0
+            for d in plan
+        )
+        total_cals = sum(
+            d["calories_est"] for d in plan
+            if d["status"] in ["done", "modified"]
+        )
+
+        if any(d["status"] != "pending" for d in plan):
+            s1, s2, s3 = st.columns(3)
+            s1.metric("Total Minutes Exercised", total_mins)
+            s2.metric("Calories Burned",         total_cals)
+            s3.metric("Sessions Completed",
+                      len([d for d in plan
+                           if d["status"] in ["done", "modified"]]))
+
+        # download
+        st.divider()
+        ex_text = f"Exercise Plan\n{'='*40}\n\n"
+        for day in plan:
+            ex_text += f"\n{day['day_name']}"
+            if day.get('is_rest_day'):
+                ex_text += " (Rest Day)"
+            ex_text += f"\n{'-'*20}\n"
+            ex_text += f"Exercise: {day['exercise_type']}\n"
+            ex_text += f"Duration: {day['duration']} min\n"
+            ex_text += f"Intensity: {day['intensity']}\n"
+            ex_text += f"Status: {day['status']}\n"
+            if day.get("actual_exercise"):
+                ex_text += f"Actually did: {day['actual_exercise']}\n"
+            if day.get("notes"):
+                ex_text += f"Notes: {day['notes']}\n"
+
+        st.download_button(
+            "⬇️ Download Exercise Plan",
+            data=ex_text,
+            file_name="exercise_plan_tracker.txt",
+            mime="text/plain"
+        )
     # ════════════════════════════════════════════════════
     # FOOD TRACKER — new
     # ════════════════════════════════════════════════════
